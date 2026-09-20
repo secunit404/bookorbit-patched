@@ -1,0 +1,101 @@
+diff --git a/server/src/modules/kobo/services/kobo-reading-state.service.ts b/server/src/modules/kobo/services/kobo-reading-state.service.ts
+index 996888a..4081754 100644
+--- a/server/src/modules/kobo/services/kobo-reading-state.service.ts
++++ b/server/src/modules/kobo/services/kobo-reading-state.service.ts
+@@ -6,6 +6,7 @@ import { NodePgDatabase } from 'drizzle-orm/node-postgres';
+ import { DB } from '../../../db';
+ import * as schema from '../../../db/schema';
+ import { UserBookStatusService } from '../../user-book-status/user-book-status.service';
++import { toKoboReadingStatus } from '../../user-book-status/kobo-status-projection.repository';
+ import { ReadingSessionService } from '../../reading-session/reading-session.service';
+ import { AchievementEventsService, ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED } from '../../achievement/achievement-events.service';
+ import {
+@@ -382,6 +383,74 @@ export class KoboReadingStateService {
+     };
+   }
+ 
++  /**
++   * Initial reading state for a book the device has not been told about yet. Without it the
++   * entitlement ships hardcoded zeros while BookOrbit already holds a position, so the device
++   * opens at the start and reports a fresh low percentage that then wins the last-write-wins
++   * comparison in syncPercentToInternalProgress, discarding the stored progress.
++   */
++  async buildSeedState(userId: number, bookId: number, entitlementId: string): Promise<JsonObj | null> {
++    const settings = await this.settingsService.getSettings(userId);
++    if (!settings.twoWayProgressSync) return null;
++
++    const [primaryFile] = await this.db
++      .select({ fileId: schema.bookFiles.id })
++      .from(schema.books)
++      .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.books.primaryFileId))
++      .where(and(eq(schema.books.id, bookId), inArray(schema.bookFiles.format, ['epub', 'kepub'])))
++      .limit(1);
++    if (!primaryFile) return null;
++
++    const [progress] = await this.db
++      .select({
++        cfi: schema.readingProgress.cfi,
++        percentage: schema.readingProgress.percentage,
++        updatedAt: schema.readingProgress.updatedAt,
++      })
++      .from(schema.readingProgress)
++      .where(and(eq(schema.readingProgress.userId, userId), eq(schema.readingProgress.bookFileId, primaryFile.fileId)))
++      .limit(1);
++
++    const [status] = await this.db
++      .select({ status: schema.userBookStatus.status, updatedAt: schema.userBookStatus.updatedAt })
++      .from(schema.userBookStatus)
++      .where(and(eq(schema.userBookStatus.userId, userId), eq(schema.userBookStatus.bookId, bookId)))
++      .limit(1);
++
++    const percentage = progress?.percentage ?? 0;
++    const koboStatus = status ? toKoboReadingStatus(status.status) : 'ReadyToRead';
++    // Nothing worth overriding the default with, and seeding ReadyToRead at 0% would only
++    // add a state row the device already assumes.
++    if (percentage < PROGRESS_EPSILON && koboStatus === 'ReadyToRead') return null;
++
++    const lastModified = maxIsoTimestamp(progress?.updatedAt?.toISOString(), status?.updatedAt?.toISOString()) ?? new Date().toISOString();
++
++    const currentBookmark: JsonObj = { LastModified: lastModified, ProgressPercent: percentage };
++    if (progress?.cfi) {
++      const point = await this.progressBridge.cfiToKoboBookmark(userId, bookId, progress.cfi);
++      if (point) {
++        currentBookmark.Location = { Source: point.source, Type: 'KoboSpan', Value: point.value };
++        if (point.contentSourceProgressPercent != null) {
++          currentBookmark.ContentSourceProgressPercent = point.contentSourceProgressPercent;
++        }
++      }
++    }
++
++    return {
++      EntitlementId: entitlementId,
++      Created: lastModified,
++      LastModified: lastModified,
++      PriorityTimestamp: lastModified,
++      CurrentBookmark: currentBookmark,
++      Statistics: { LastModified: lastModified },
++      StatusInfo: {
++        LastModified: lastModified,
++        Status: koboStatus,
++        TimesStartedReading: koboStatus === 'ReadyToRead' ? 0 : 1,
++      },
++    };
++  }
++
+   /**
+    * Computes a precise KoboSpan Location for the bookmark when the hub position moved
+    * since the device last reported. readingProgress.koboLocationValue is set only by
+diff --git a/server/src/modules/kobo/services/kobo-sync.service.ts b/server/src/modules/kobo/services/kobo-sync.service.ts
+index 6f1f59c..4cfaf9e 100644
+--- a/server/src/modules/kobo/services/kobo-sync.service.ts
++++ b/server/src/modules/kobo/services/kobo-sync.service.ts
+@@ -593,7 +593,8 @@ export class KoboSyncService {
+       const book = booksById.get(row.bookId) ?? null;
+       if (!book) continue;
+ 
+-      const readingState = await this.readingStateService.getRawState(userId, row.bookId);
++      const storedReadingState = await this.readingStateService.getRawState(userId, row.bookId);
++      const readingState = storedReadingState ?? (await this.readingStateService.buildSeedState(userId, row.bookId, book.koboEntitlementId));
+       const defaultReadingState = readingState ?? this.buildDefaultReadingState(book.koboEntitlementId);
+ 
+       if (row.isNew || row.needsLegacyNumericRemoval) {

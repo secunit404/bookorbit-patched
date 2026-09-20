@@ -1,0 +1,157 @@
+diff --git a/server/src/modules/kobo/services/kobo-reading-state.service.test.ts b/server/src/modules/kobo/services/kobo-reading-state.service.test.ts
+index 8c6840d..f1c9162 100644
+--- a/server/src/modules/kobo/services/kobo-reading-state.service.test.ts
++++ b/server/src/modules/kobo/services/kobo-reading-state.service.test.ts
+@@ -739,4 +739,72 @@ describe('KoboReadingStateService', () => {
+       warn.mockRestore();
+     });
+   });
++
++  describe('buildSeedState', () => {
++    function seedDb(rows: { file?: unknown[]; progress?: unknown[]; status?: unknown[] }) {
++      const db = makeDb();
++      db.select
++        .mockReturnValueOnce(makeSelectChain(rows.file ?? [{ fileId: 495 }]) as never)
++        .mockReturnValueOnce(makeSelectChain(rows.progress ?? []) as never)
++        .mockReturnValueOnce(makeSelectChain(rows.status ?? []) as never);
++      return db;
++    }
++
++    it('returns null when two-way progress sync is off', async () => {
++      settingsService.getSettings.mockResolvedValue({ twoWayProgressSync: false });
++      const service = makeService(seedDb({}));
++
++      expect(await service.buildSeedState(2, 249, 'ent-249')).toBeNull();
++    });
++
++    it('seeds the bookmark from hub progress so the device does not start at zero', async () => {
++      settingsService.getSettings.mockResolvedValue({ twoWayProgressSync: true });
++      progressBridge.cfiToKoboBookmark.mockResolvedValue({
++        source: 'OEBPS/ch3.xhtml',
++        value: 'kobo.12.4',
++        contentSourceProgressPercent: 18,
++      });
++      const db = seedDb({
++        progress: [{ cfi: 'epubcfi(/6/16!/4)', percentage: 44, updatedAt: new Date('2026-09-20T09:05:50.000Z') }],
++        status: [{ status: 'reading', updatedAt: new Date('2026-09-20T08:00:00.000Z') }],
++      });
++
++      const state = (await makeService(db).buildSeedState(2, 249, 'ent-249')) as any;
++
++      expect(state.EntitlementId).toBe('ent-249');
++      expect(state.CurrentBookmark.ProgressPercent).toBe(44);
++      expect(state.CurrentBookmark.Location).toEqual({ Source: 'OEBPS/ch3.xhtml', Type: 'KoboSpan', Value: 'kobo.12.4' });
++      expect(state.CurrentBookmark.ContentSourceProgressPercent).toBe(18);
++      expect(state.StatusInfo).toMatchObject({ Status: 'Reading', TimesStartedReading: 1 });
++      // The newest hub write, so a device pushing an older position cannot win on timestamp.
++      expect(state.LastModified).toBe('2026-09-20T09:05:50.000Z');
++    });
++
++    it('still seeds the percentage when the cfi cannot be converted to a KoboSpan', async () => {
++      settingsService.getSettings.mockResolvedValue({ twoWayProgressSync: true });
++      progressBridge.cfiToKoboBookmark.mockResolvedValue(null);
++      const db = seedDb({
++        progress: [{ cfi: 'epubcfi(/6/16!/4)', percentage: 44, updatedAt: new Date('2026-09-20T09:05:50.000Z') }],
++        status: [{ status: 'reading', updatedAt: new Date('2026-09-20T08:00:00.000Z') }],
++      });
++
++      const state = (await makeService(db).buildSeedState(2, 249, 'ent-249')) as any;
++
++      expect(state.CurrentBookmark.ProgressPercent).toBe(44);
++      expect(state.CurrentBookmark.Location).toBeUndefined();
++    });
++
++    it('returns null for an untouched book so the zeroed default is used', async () => {
++      settingsService.getSettings.mockResolvedValue({ twoWayProgressSync: true });
++      const db = seedDb({ progress: [{ cfi: null, percentage: 0, updatedAt: new Date() }], status: [{ status: 'unread', updatedAt: new Date() }] });
++
++      expect(await makeService(db).buildSeedState(2, 249, 'ent-249')).toBeNull();
++    });
++
++    it('returns null when the book has no epub or kepub primary file', async () => {
++      settingsService.getSettings.mockResolvedValue({ twoWayProgressSync: true });
++
++      expect(await makeService(seedDb({ file: [] })).buildSeedState(2, 249, 'ent-249')).toBeNull();
++    });
++  });
+ });
+diff --git a/server/src/modules/kobo/services/kobo-sync.service.test.ts b/server/src/modules/kobo/services/kobo-sync.service.test.ts
+index c67d889..9793982 100644
+--- a/server/src/modules/kobo/services/kobo-sync.service.test.ts
++++ b/server/src/modules/kobo/services/kobo-sync.service.test.ts
+@@ -154,6 +154,7 @@ describe('KoboSyncService', () => {
+   };
+   const readingStateService = {
+     getRawState: vi.fn(),
++    buildSeedState: vi.fn(),
+   };
+   const contentFilterRepository = {
+     findByUserId: vi.fn(),
+@@ -205,6 +206,7 @@ describe('KoboSyncService', () => {
+     bookAccessService.getAccessibleLibraryIds.mockResolvedValue(null);
+     smartScopeService.findKoboSyncScopes.mockResolvedValue([]);
+     readingStateService.getRawState.mockResolvedValue(null);
++    readingStateService.buildSeedState.mockResolvedValue(null);
+     contentFilterRepository.findByUserId.mockResolvedValue([]);
+     metadataExtractionService.detectFixedLayout.mockResolvedValue(null);
+     bookIdentityService.ensureForBooks.mockImplementation((_userId: number, bookIds: number[], needsLegacyNumericRemoval: boolean) =>
+@@ -563,6 +565,59 @@ describe('KoboSyncService', () => {
+     });
+   });
+ 
++  it('getPageFromSnapshot seeds a new entitlement from hub progress when no Kobo state is stored', async () => {
++    const db = makeDb({
++      select: [[{ bookId: 2, pendingDelete: false, isNew: true }]],
++    });
++    const service = makeService(db);
++    vi.spyOn(service as any, 'fetchEligibleBooksByIds').mockResolvedValue(new Map([[2, makeBook(2)]]));
++    readingStateService.getRawState.mockResolvedValue(null);
++    const seeded = {
++      EntitlementId: 'entitlement-2',
++      CurrentBookmark: { ProgressPercent: 44, LastModified: '2026-09-20T09:05:50.000Z' },
++      StatusInfo: { Status: 'Reading', TimesStartedReading: 1 },
++    };
++    readingStateService.buildSeedState.mockResolvedValue(seeded);
++
++    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([2])));
++
++    expect(readingStateService.buildSeedState).toHaveBeenCalledWith(7, 2, makeBook(2).koboEntitlementId);
++    expect(result.entitlements[0]).toEqual({
++      NewEntitlement: expect.objectContaining({ ReadingState: seeded }),
++    });
++  });
++
++  it('getPageFromSnapshot falls back to the zeroed default when there is no stored or hub state', async () => {
++    const db = makeDb({
++      select: [[{ bookId: 2, pendingDelete: false, isNew: true }]],
++    });
++    const service = makeService(db);
++    vi.spyOn(service as any, 'fetchEligibleBooksByIds').mockResolvedValue(new Map([[2, makeBook(2)]]));
++    readingStateService.getRawState.mockResolvedValue(null);
++    readingStateService.buildSeedState.mockResolvedValue(null);
++
++    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([2])));
++
++    const state = (result.entitlements[0] as any).NewEntitlement.ReadingState;
++    expect(state.CurrentBookmark.ProgressPercent).toBe(0);
++    expect(state.StatusInfo.Status).toBe('ReadyToRead');
++  });
++
++  it('getPageFromSnapshot prefers stored Kobo state over a hub seed', async () => {
++    const db = makeDb({
++      select: [[{ bookId: 2, pendingDelete: false, isNew: true }]],
++    });
++    const service = makeService(db);
++    vi.spyOn(service as any, 'fetchEligibleBooksByIds').mockResolvedValue(new Map([[2, makeBook(2)]]));
++    readingStateService.getRawState.mockResolvedValue({ EntitlementId: 'entitlement-2', CurrentBookmark: { ProgressPercent: 61 } });
++    readingStateService.buildSeedState.mockResolvedValue({ EntitlementId: 'entitlement-2', CurrentBookmark: { ProgressPercent: 44 } });
++
++    const result = await (service as any).getPageFromSnapshot(7, 22, 'tok', 'https://base', new Map(), () => Promise.resolve(new Set([2])));
++
++    expect((result.entitlements[0] as any).NewEntitlement.ReadingState.CurrentBookmark.ProgressPercent).toBe(61);
++    expect(readingStateService.buildSeedState).not.toHaveBeenCalled();
++  });
++
+   it('getPageFromSnapshot sends a replacement entitlement for changed books still using legacy numeric ids', async () => {
+     const db = makeDb({
+       select: [[{ bookId: 3, pendingDelete: false, isNew: false, needsLegacyNumericRemoval: true }]],

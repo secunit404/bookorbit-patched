@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Rebuild even if the image for this release already exists
+        description: Rebuild even if this release was already built from the same patch set
         type: boolean
         default: false
       release_tag:
@@ -25,7 +25,8 @@ concurrency:
 env:
   UPSTREAM: bookorbit/bookorbit
   IMAGE: ghcr.io/${{ github.repository_owner }}/bookorbit-patched
-  ADAPTER: server/src/modules/book-request/download-clients/adapters/qbittorrent.adapter.ts
+  MANIFEST: patches/manifest.json
+  STATE_FILE: state/last-built.json
 
 jobs:
   build:
@@ -50,6 +51,16 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Upstream release: ${TAG}" >> "$GITHUB_STEP_SUMMARY"
 
+      # Adding, editing or removing a patch must force a rebuild even when the image for this
+      # release already exists, or the tag would keep pointing at an image missing the new patch.
+      - name: Fingerprint the patch set
+        id: fingerprint
+        run: |
+          set -euo pipefail
+          SHA=$(jq -r '.patches[].file' "${MANIFEST}" | sort | xargs sha256sum "${MANIFEST}" | sha256sum | cut -c1-16)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Patch set: ${SHA}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -57,19 +68,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Skip releases that are already built
+      - name: Skip releases already built from this patch set
         id: existing
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          PATCH_SHA: ${{ steps.fingerprint.outputs.sha }}
           FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
+          BUILT=false
           if [ "${FORCE}" != "true" ] && docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
-            echo "built=true" >> "$GITHUB_OUTPUT"
-            echo "${IMAGE}:${TAG} already exists, nothing to do." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "built=false" >> "$GITHUB_OUTPUT"
+            RECORDED_SHA=$(jq -r --arg tag "${TAG}" 'select(.tag == $tag) | .patches_sha // ""' "${STATE_FILE}" 2>/dev/null || true)
+            if [ "${RECORDED_SHA}" = "${PATCH_SHA}" ]; then
+              BUILT=true
+              echo "${IMAGE}:${TAG} already exists and matches patch set ${PATCH_SHA}, nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "${IMAGE}:${TAG} exists but was built from a different patch set, rebuilding." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
+          echo "built=${BUILT}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout the upstream release
         if: steps.existing.outputs.built != 'true'
@@ -79,38 +96,65 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
           path: upstream
 
-      # A release that already accepts QBT_SID_<port> needs no patched image: stop here so the
-      # outdated patch is never applied silently and the official image can be used again.
-      - name: Stop if upstream fixed the cookie itself
+      # Each patch carries a marker whose presence in its target file means the change is already
+      # there. Present before applying, upstream ships the fix and the patch is dropped; absent
+      # after applying, the patch did not do what it claims and the build fails. A patch that no
+      # longer applies is a hard failure on purpose: silently shipping an unpatched image under a
+      # tag that claims to be patched is the one outcome this repository exists to prevent.
+      - name: Apply the patches
         if: steps.existing.outputs.built != 'true'
-        id: upstream_fix
+        id: apply
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          if grep -q 'QBT_SID' "upstream/${ADAPTER}"; then
-            echo 'fixed=true' >> "$GITHUB_OUTPUT"
+          APPLIED=()
+          OBSOLETE=()
+
+          while IFS=$'\t' read -r id file target marker description; do
+            if grep -q "${marker}" "upstream/${target}"; then
+              OBSOLETE+=("${id}")
+              echo "::notice::${id} is already in ${TAG}, skipping (${description})"
+              continue
+            fi
+
+            git -C upstream apply --verbose "${GITHUB_WORKSPACE}/${file}"
+
+            if ! grep -q "${marker}" "upstream/${target}"; then
+              echo "::error::${id} applied but ${marker} is missing from ${target}"
+              exit 1
+            fi
+            APPLIED+=("${id}")
+          done < <(jq -r '.patches[] | [.id, .file, .target, .marker, .description] | @tsv' "${MANIFEST}")
+
+          {
+            echo '## Patches'
+            echo
+            for id in "${APPLIED[@]:-}"; do [ -n "${id}" ] && echo "- applied \`${id}\`"; done
+            for id in "${OBSOLETE[@]:-}"; do [ -n "${id}" ] && echo "- skipped \`${id}\` (upstream ships it)"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ${#APPLIED[@]} -eq 0 ]; then
             {
-              echo '## Upstream ships the fix'
               echo
-              echo "${{ steps.release.outputs.tag }} accepts QBT_SID cookies on its own."
+              echo '## Upstream ships every patch'
+              echo
               echo 'Point the deployment back at ghcr.io/bookorbit/bookorbit and archive this repository.'
             } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'fixed=false' >> "$GITHUB_OUTPUT"
+            echo 'any=false' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-      - name: Apply the patch
-        if: steps.existing.outputs.built != 'true' && steps.upstream_fix.outputs.fixed != 'true'
-        run: |
-          set -euo pipefail
-          git -C upstream apply --verbose "${GITHUB_WORKSPACE}/patches/qbt-sid-cookie.patch"
-          grep -q 'QBT_SID_' "upstream/${ADAPTER}"
+          SUFFIX=$(IFS=.; echo "${APPLIED[*]}")
+          echo 'any=true' >> "$GITHUB_OUTPUT"
+          echo "suffix=${SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
-        if: steps.existing.outputs.built != 'true' && steps.upstream_fix.outputs.fixed != 'true'
+        if: steps.existing.outputs.built != 'true' && steps.apply.outputs.any == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push
-        if: steps.existing.outputs.built != 'true' && steps.upstream_fix.outputs.fixed != 'true'
+        if: steps.existing.outputs.built != 'true' && steps.apply.outputs.any == 'true'
         uses: docker/build-push-action@v6
         with:
           context: upstream
@@ -118,7 +162,7 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          build-args: APP_VERSION=${{ steps.release.outputs.tag }}+qbt-cookie
+          build-args: APP_VERSION=${{ steps.release.outputs.tag }}+${{ steps.apply.outputs.suffix }}
           tags: |
             ${{ env.IMAGE }}:${{ steps.release.outputs.tag }}
             ${{ env.IMAGE }}:release
@@ -128,16 +172,26 @@ jobs:
       # Also keeps the scheduled trigger alive: GitHub disables cron in repositories
       # that see no activity for 60 days.
       - name: Record the built release
-        if: steps.existing.outputs.built != 'true' && steps.upstream_fix.outputs.fixed != 'true'
+        if: steps.existing.outputs.built != 'true' && steps.apply.outputs.any == 'true'
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          PATCH_SHA: ${{ steps.fingerprint.outputs.sha }}
+          SUFFIX: ${{ steps.apply.outputs.suffix }}
         run: |
           set -euo pipefail
-          mkdir -p state
-          printf '%s built from %s at %s\n' "${IMAGE}:${TAG}" "${UPSTREAM}@${TAG}" "$(date -u +%FT%TZ)" > state/last-built.txt
+          mkdir -p "$(dirname "${STATE_FILE}")"
+          jq -n \
+            --arg image "${IMAGE}:${TAG}" \
+            --arg tag "${TAG}" \
+            --arg upstream "${UPSTREAM}@${TAG}" \
+            --arg patches_sha "${PATCH_SHA}" \
+            --arg applied "${SUFFIX}" \
+            --arg built_at "$(date -u +%FT%TZ)" \
+            '{image: $image, tag: $tag, upstream: $upstream, patches_sha: $patches_sha, applied: ($applied | split(".")), built_at: $built_at}' \
+            > "${STATE_FILE}"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add state/last-built.txt
+          git add "${STATE_FILE}"
           git commit -m "chore: record ${TAG} image build" || exit 0
           git push
           echo "Pushed ${IMAGE}:${TAG} and ${IMAGE}:release" >> "$GITHUB_STEP_SUMMARY"
