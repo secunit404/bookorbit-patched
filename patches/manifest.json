@@ -1,0 +1,20 @@
+{
+  "patches": [
+    {
+      "id": "qbt-cookie",
+      "file": "patches/qbt-sid-cookie.patch",
+      "tests": "patches/qbt-sid-cookie-tests.patch",
+      "target": "server/src/modules/book-request/download-clients/adapters/qbittorrent.adapter.ts",
+      "marker": "QBT_SID",
+      "description": "Accept the QBT_SID_<port> session cookie sent by qBittorrent 5.2+"
+    },
+    {
+      "id": "kobo-seed",
+      "file": "patches/kobo-reading-state-seed.patch",
+      "tests": "patches/kobo-reading-state-seed-tests.patch",
+      "target": "server/src/modules/kobo/services/kobo-sync.service.ts",
+      "marker": "buildSeedState",
+      "description": "Seed a new Kobo entitlement from stored reading progress instead of hardcoded zeros"
+    }
+  ]
+}
