@@ -20,6 +20,7 @@ there.
 |---|---|
 | `qbt-cookie` | The qBittorrent download client also accepts the `QBT_SID_<port>` session cookie that qBittorrent 5.2+ sends. Without it every call after a successful login is answered with `403`, and BookOrbit reports `qBittorrent answered 403 for /api/v2/app/version`. |
 | `kobo-seed` | A new Kobo entitlement is seeded from stored reading progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device the book is at 0%, the device opens at the start and reports a fresh low percentage, and that newer timestamp overwrites the real progress in BookOrbit. |
+| `whats-new` | Pins the patch list to the top of the What's New tab, fed from this manifest at build time. The popup path is untouched and keeps showing upstream releases only. |
 
 Each patch has a matching `*-tests.patch` holding its unit tests. Those are kept for
 reference only — the image build applies the code patches alone.
@@ -37,8 +38,12 @@ order:
 - **Every patch obsolete** — nothing is built, and the run summary says to switch back to
   `ghcr.io/bookorbit/bookorbit` and archive this repository.
 
-The applied patch ids become the version suffix, so `v2.10.0+qbt-cookie.kobo-seed` tells
-you exactly what went into an image.
+Images are versioned `<tag>+patches`, e.g. `v2.10.0+patches`. The suffix is deliberately
+fixed rather than a list of ids: release-notes validates the running version against
+`SEMVER_RE`, whose build-metadata group is `[\w.]+` and so rejects the hyphens in our ids,
+and a version that fails it silently disables the check that stops What's New announcing
+releases newer than the build you are on. Which patches are actually in an image is
+answered by the What's New tab and by `state/last-built.json`.
 
 A release is rebuilt when its image is missing *or* when the patch set changed since that
 image was built — `state/last-built.json` records the fingerprint. Adding or editing a
@@ -54,5 +59,6 @@ specific upstream tag.
    `patches/<id>-tests.patch`.
 3. Add an entry to `patches/manifest.json`. Pick a `marker` that is absent upstream and
    present after the patch applies — it serves as both the obsolescence check and the
-   post-apply assertion.
+   post-apply assertion. `title` and `description` are what the What's New tab shows, so
+   write them for whoever uses this BookOrbit, not for yourself.
 4. Verify against a clean checkout: `git -C upstream apply --verbose patches/<id>.patch`.

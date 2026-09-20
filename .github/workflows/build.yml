@@ -153,6 +153,15 @@ jobs:
           echo 'any=true' >> "$GITHUB_OUTPUT"
           echo "applied=$(IFS=.; echo "${APPLIED[*]}")" >> "$GITHUB_OUTPUT"
 
+          # What the whats-new patch renders in the tab. Built from the patches that actually
+          # went in, so a patch upstream has since shipped stops being advertised as ours.
+          printf '%s\n' "${APPLIED[@]}" \
+            | jq -R . \
+            | jq -s --slurpfile m "${MANIFEST}" \
+                '[ .[] as $id | $m[0].patches[] | select(.id == $id) | {title, body: .description} ]' \
+            | jq -c . > /tmp/patch-notes.json
+          echo "notes=$(cat /tmp/patch-notes.json)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Buildx
         if: steps.existing.outputs.built != 'true' && steps.apply.outputs.any == 'true'
         uses: docker/setup-buildx-action@v3
@@ -166,7 +175,9 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          build-args: APP_VERSION=${{ steps.release.outputs.tag }}+patches
+          build-args: |
+            APP_VERSION=${{ steps.release.outputs.tag }}+patches
+            BOOKORBIT_PATCH_NOTES=${{ steps.apply.outputs.notes }}
           tags: |
             ${{ env.IMAGE }}:${{ steps.release.outputs.tag }}
             ${{ env.IMAGE }}:release

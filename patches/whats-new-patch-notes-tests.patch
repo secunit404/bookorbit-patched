@@ -1,0 +1,75 @@
+diff --git a/server/src/modules/release-notes/release-notes.service.test.ts b/server/src/modules/release-notes/release-notes.service.test.ts
+index 399c88b..552d3b2 100644
+--- a/server/src/modules/release-notes/release-notes.service.test.ts
++++ b/server/src/modules/release-notes/release-notes.service.test.ts
+@@ -114,3 +114,70 @@ describe('ReleaseNotesService.getSince', () => {
+     expect(res.releases[0].highlights).toHaveLength(1);
+   });
+ });
++
++describe('ReleaseNotesService local patch notes', () => {
++  const NOTES = JSON.stringify([
++    { title: 'qBittorrent 5.2 cookies', body: 'Accepts the QBT_SID_<port> session cookie.' },
++    { title: 'Kobo progress seed', body: 'Seeds a new entitlement from stored reading progress.' },
++  ]);
++
++  afterEach(() => {
++    delete process.env.BOOKORBIT_PATCH_NOTES;
++  });
++
++  it('pins a patch note to the top of the first page', async () => {
++    process.env.BOOKORBIT_PATCH_NOTES = NOTES;
++    const service = makeService([ghRelease('v1.2.0', true)], true, 'v1.2.0+patches');
++
++    const res = await service.getAll(1);
++
++    expect(res.releases[0].name).toBe('Local patches');
++    expect(res.releases[0].version).toBe('v1.2.0+patches');
++    expect(res.releases[0].highlights.map((h) => h.title)).toEqual(['qBittorrent 5.2 cookies', 'Kobo progress seed']);
++    expect(res.releases[1].version).toBe('v1.2.0');
++  });
++
++  it('leaves later pages untouched', async () => {
++    process.env.BOOKORBIT_PATCH_NOTES = NOTES;
++    const service = makeService([ghRelease('v1.2.0', true)], true, 'v1.2.0+patches');
++
++    const res = await service.getAll(2);
++
++    expect(res.releases.every((r) => r.name !== 'Local patches')).toBe(true);
++  });
++
++  it('never touches the popup path', async () => {
++    process.env.BOOKORBIT_PATCH_NOTES = NOTES;
++    const service = makeService([ghRelease('v1.2.0', true)], true, 'v1.2.0+patches');
++
++    const res = await service.getSince('v1.0.0');
++
++    expect(res.releases.every((r) => r.name !== 'Local patches')).toBe(true);
++  });
++
++  it('adds nothing on a stock build', async () => {
++    const service = makeService([ghRelease('v1.2.0', true)], true, 'v1.2.0');
++
++    const res = await service.getAll(1);
++
++    expect(res.releases[0].version).toBe('v1.2.0');
++  });
++
++  it('adds nothing when the baked-in value is malformed', async () => {
++    process.env.BOOKORBIT_PATCH_NOTES = 'not json';
++    const service = makeService([ghRelease('v1.2.0', true)], true, 'v1.2.0+patches');
++
++    const res = await service.getAll(1);
++
++    expect(res.releases[0].version).toBe('v1.2.0');
++  });
++
++  it('skips entries that are not title/body pairs', async () => {
++    process.env.BOOKORBIT_PATCH_NOTES = JSON.stringify([{ title: 'kept', body: 'yes' }, { title: 42 }, 'nope', null]);
++    const service = makeService([ghRelease('v1.2.0', true)], true, 'v1.2.0+patches');
++
++    const res = await service.getAll(1);
++
++    expect(res.releases[0].highlights.map((h) => h.title)).toEqual(['kept']);
++  });
++});

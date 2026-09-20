@@ -1,0 +1,93 @@
+diff --git a/Dockerfile b/Dockerfile
+index d6ebf4a..ebe0ea7 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -50,6 +50,8 @@ WORKDIR /app
+ 
+ ARG APP_VERSION=dev
+ ENV APP_VERSION=${APP_VERSION}
++ARG BOOKORBIT_PATCH_NOTES=
++ENV BOOKORBIT_PATCH_NOTES=${BOOKORBIT_PATCH_NOTES}
+ ENV KOBO_CLOUDSCRAPER_PYTHON=/opt/bookorbit-python/bin/python
+ ENV KOREADER_PLUGIN_PATH=/app/koreader-plugin/bookorbit.koplugin
+ 
+diff --git a/server/src/modules/release-notes/release-notes.constants.ts b/server/src/modules/release-notes/release-notes.constants.ts
+index 74c335c..7ebe381 100644
+--- a/server/src/modules/release-notes/release-notes.constants.ts
++++ b/server/src/modules/release-notes/release-notes.constants.ts
+@@ -24,3 +24,6 @@ export const PAGE_CACHE_MAX = 10;
+ export const MEDIA_TYPE_CACHE_MAX = 1000;
+ 
+ export const SEMVER_RE = /^v\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/;
++
++/** Where the pinned local-patch note links to. */
++export const PATCH_NOTES_URL = 'https://github.com/secunit404/bookorbit-patched';
+diff --git a/server/src/modules/release-notes/release-notes.service.ts b/server/src/modules/release-notes/release-notes.service.ts
+index 2b55f1f..6528ed3 100644
+--- a/server/src/modules/release-notes/release-notes.service.ts
++++ b/server/src/modules/release-notes/release-notes.service.ts
+@@ -8,6 +8,7 @@ import { AppSettingsService } from '../app-settings/app-settings.service';
+ import { parseHighlights, stripHighlightsSection } from './highlights.parser';
+ import {
+   CUMULATIVE_VERSION_CAP,
++  PATCH_NOTES_URL,
+   MEDIA_PROBE_CONCURRENCY,
+   MEDIA_TYPE_CACHE_MAX,
+   PAGE_CACHE_MAX,
+@@ -48,7 +49,55 @@ export class ReleaseNotesService {
+   async getAll(page: number): Promise<ReleaseNotesResponse> {
+     const safePage = Number.isInteger(page) && page > 0 ? page : 1;
+     const releases = await this.getPage(safePage);
+-    return { releases, hasMore: releases.length >= RELEASE_NOTES_PER_PAGE };
++    const withPatches = safePage === 1 ? [...this.buildPatchNotes(), ...releases] : releases;
++    return { releases: withPatches, hasMore: releases.length >= RELEASE_NOTES_PER_PAGE };
++  }
++
++  /**
++   * Pins a note describing the local patches to the top of the What's New tab. This build is not
++   * stock upstream and its version only says "+patches", so without this there is nothing in the
++   * UI that says which changes are in it. Only the tab is touched: getSince drives the popup and
++   * stays a faithful view of upstream releases.
++   */
++  private buildPatchNotes(): ReleaseNote[] {
++    const patches = this.readPatchNotes();
++    if (patches.length === 0) return [];
++
++    return [
++      {
++        version: this.config.get<string>('app.version') ?? 'patched',
++        name: 'Local patches',
++        date: null,
++        changelogUrl: PATCH_NOTES_URL,
++        changelogBody: null,
++        highlights: patches.map((patch) => ({
++          icon: 'Wrench',
++          title: patch.title,
++          body: patch.body,
++          media: [],
++        })),
++      },
++    ];
++  }
++
++  /** Patch list baked in at build time from the patch repository's manifest. */
++  private readPatchNotes(): { title: string; body: string }[] {
++    const raw = process.env.BOOKORBIT_PATCH_NOTES?.trim();
++    if (!raw) return [];
++    try {
++      const parsed: unknown = JSON.parse(raw);
++      if (!Array.isArray(parsed)) return [];
++      return parsed.flatMap((entry) => {
++        if (typeof entry !== 'object' || entry === null) return [];
++        const { title, body } = entry as Record<string, unknown>;
++        if (typeof title !== 'string' || typeof body !== 'string') return [];
++        return [{ title, body }];
++      });
++    } catch (error: unknown) {
++      const message = error instanceof Error ? error.message : 'unknown error';
++      this.logger.warn(`[release_notes.patch_notes] [fail] error="${sanitizeLogValue(message)}" - could not parse BOOKORBIT_PATCH_NOTES`);
++      return [];
++    }
+   }
+ 
+   private async getPage(page: number): Promise<ReleaseNote[]> {

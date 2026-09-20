@@ -6,7 +6,8 @@
       "tests": "patches/qbt-sid-cookie-tests.patch",
       "target": "server/src/modules/book-request/download-clients/adapters/qbittorrent.adapter.ts",
       "marker": "QBT_SID",
-      "description": "Accept the QBT_SID_<port> session cookie sent by qBittorrent 5.2+"
+      "title": "qBittorrent 5.2 session cookies",
+      "description": "The download client also accepts the QBT_SID_<port> cookie that qBittorrent 5.2 and newer send. Without it every call after a successful login is answered with 403."
     },
     {
       "id": "kobo-seed",
@@ -14,7 +15,17 @@
       "tests": "patches/kobo-reading-state-seed-tests.patch",
       "target": "server/src/modules/kobo/services/kobo-sync.service.ts",
       "marker": "buildSeedState",
-      "description": "Seed a new Kobo entitlement from stored reading progress instead of hardcoded zeros"
+      "title": "Kobo keeps your reading progress on first sync",
+      "description": "A new Kobo entitlement is built from your stored progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device you are at 0%, and the position the device then reports overwrites the real one."
+    },
+    {
+      "id": "whats-new",
+      "file": "patches/whats-new-patch-notes.patch",
+      "tests": "patches/whats-new-patch-notes-tests.patch",
+      "target": "server/src/modules/release-notes/release-notes.service.ts",
+      "marker": "BOOKORBIT_PATCH_NOTES",
+      "title": "This section",
+      "description": "Pins the local patch list to the top of the What's New tab, since the version only says +patches. The popup keeps showing upstream releases only."
     }
   ]
 }
