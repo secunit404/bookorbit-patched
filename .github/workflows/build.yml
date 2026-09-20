@@ -145,9 +145,13 @@ jobs:
             exit 0
           fi
 
-          SUFFIX=$(IFS=.; echo "${APPLIED[*]}")
+          # A fixed suffix rather than the patch ids: it keeps APP_VERSION valid against the
+          # release-notes SEMVER_RE (whose build-metadata group is [\w.]+ and so rejects the
+          # hyphens in our ids), and a version that fails it silently disables the "never
+          # announce releases newer than the running build" cap. Which patches are in is
+          # answered by What's New and by state/last-built.json.
           echo 'any=true' >> "$GITHUB_OUTPUT"
-          echo "suffix=${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "applied=$(IFS=.; echo "${APPLIED[*]}")" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         if: steps.existing.outputs.built != 'true' && steps.apply.outputs.any == 'true'
@@ -162,7 +166,7 @@ jobs:
           platforms: linux/amd64
           push: true
           provenance: false
-          build-args: APP_VERSION=${{ steps.release.outputs.tag }}+${{ steps.apply.outputs.suffix }}
+          build-args: APP_VERSION=${{ steps.release.outputs.tag }}+patches
           tags: |
             ${{ env.IMAGE }}:${{ steps.release.outputs.tag }}
             ${{ env.IMAGE }}:release
@@ -176,7 +180,7 @@ jobs:
         env:
           TAG: ${{ steps.release.outputs.tag }}
           PATCH_SHA: ${{ steps.fingerprint.outputs.sha }}
-          SUFFIX: ${{ steps.apply.outputs.suffix }}
+          APPLIED: ${{ steps.apply.outputs.applied }}
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "${STATE_FILE}")"
@@ -185,7 +189,7 @@ jobs:
             --arg tag "${TAG}" \
             --arg upstream "${UPSTREAM}@${TAG}" \
             --arg patches_sha "${PATCH_SHA}" \
-            --arg applied "${SUFFIX}" \
+            --arg applied "${APPLIED}" \
             --arg built_at "$(date -u +%FT%TZ)" \
             '{image: $image, tag: $tag, upstream: $upstream, patches_sha: $patches_sha, applied: ($applied | split(".")), built_at: $built_at}' \
             > "${STATE_FILE}"
