@@ -18,7 +18,6 @@ there.
 
 | id | what it fixes |
 |---|---|
-| `qbt-cookie` | The qBittorrent download client also accepts the `QBT_SID_<port>` session cookie that qBittorrent 5.2+ sends. Without it every call after a successful login is answered with `403`, and BookOrbit reports `qBittorrent answered 403 for /api/v2/app/version`. |
 | `kobo-seed` | A new Kobo entitlement is seeded from stored reading progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device the book is at 0%, the device opens at the start and reports a fresh low percentage, and that newer timestamp overwrites the real progress in BookOrbit. |
 | `whats-new` | Pins the patch list to the top of the What's New tab, fed from this manifest at build time. The popup path is untouched and keeps showing upstream releases only. |
 

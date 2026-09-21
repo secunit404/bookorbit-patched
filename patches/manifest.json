@@ -1,15 +1,6 @@
 {
   "patches": [
     {
-      "id": "qbt-cookie",
-      "file": "patches/qbt-sid-cookie.patch",
-      "tests": "patches/qbt-sid-cookie-tests.patch",
-      "target": "server/src/modules/book-request/download-clients/adapters/qbittorrent.adapter.ts",
-      "marker": "QBT_SID",
-      "title": "qBittorrent 5.2 session cookies",
-      "description": "The download client also accepts the QBT_SID_<port> cookie that qBittorrent 5.2 and newer send. Without it every call after a successful login is answered with 403."
-    },
-    {
       "id": "kobo-seed",
       "file": "patches/kobo-reading-state-seed.patch",
       "tests": "patches/kobo-reading-state-seed-tests.patch",

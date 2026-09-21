@@ -1,5 +1,5 @@
 diff --git a/server/src/modules/kobo/services/kobo-reading-state.service.ts b/server/src/modules/kobo/services/kobo-reading-state.service.ts
-index 996888a..4081754 100644
+index 739604d8..2b2dd4c5 100644
 --- a/server/src/modules/kobo/services/kobo-reading-state.service.ts
 +++ b/server/src/modules/kobo/services/kobo-reading-state.service.ts
 @@ -6,6 +6,7 @@ import { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -9,8 +9,8 @@ index 996888a..4081754 100644
 +import { toKoboReadingStatus } from '../../user-book-status/kobo-status-projection.repository';
  import { ReadingSessionService } from '../../reading-session/reading-session.service';
  import { AchievementEventsService, ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED } from '../../achievement/achievement-events.service';
- import {
-@@ -382,6 +383,74 @@ export class KoboReadingStateService {
+ import { BookService } from '../../book/book.service';
+@@ -385,6 +386,74 @@ export class KoboReadingStateService {
      };
    }
  
@@ -86,10 +86,10 @@ index 996888a..4081754 100644
     * Computes a precise KoboSpan Location for the bookmark when the hub position moved
     * since the device last reported. readingProgress.koboLocationValue is set only by
 diff --git a/server/src/modules/kobo/services/kobo-sync.service.ts b/server/src/modules/kobo/services/kobo-sync.service.ts
-index 6f1f59c..4cfaf9e 100644
+index 2068d11f..974780a2 100644
 --- a/server/src/modules/kobo/services/kobo-sync.service.ts
 +++ b/server/src/modules/kobo/services/kobo-sync.service.ts
-@@ -593,7 +593,8 @@ export class KoboSyncService {
+@@ -594,7 +594,8 @@ export class KoboSyncService {
        const book = booksById.get(row.bookId) ?? null;
        if (!book) continue;
  
