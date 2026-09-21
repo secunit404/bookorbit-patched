@@ -1,12 +1,11 @@
 {
-  "image": "ghcr.io/secunit404/bookorbit-patched:v2.10.0",
-  "tag": "v2.10.0",
-  "upstream": "bookorbit/bookorbit@v2.10.0",
-  "patches_sha": "52e6b9c08cbefee2",
+  "image": "ghcr.io/secunit404/bookorbit-patched:v3.0.0",
+  "tag": "v3.0.0",
+  "upstream": "bookorbit/bookorbit@v3.0.0",
+  "patches_sha": "66b17bf092e03f85",
   "applied": [
-    "qbt-cookie",
     "kobo-seed",
     "whats-new"
   ],
-  "built_at": "2026-09-20T12:56:12Z"
+  "built_at": "2026-09-21T10:14:23Z"
 }
