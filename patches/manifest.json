@@ -10,6 +10,15 @@
       "description": "A new Kobo entitlement is built from your stored progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device you are at 0%, and the position the device then reports overwrites the real one."
     },
     {
+      "id": "audiobook-assembly",
+      "file": "patches/audiobook-assembly.patch",
+      "tests": "patches/audiobook-assembly-tests.patch",
+      "target": "server/src/modules/book-request/fulfillment/direct-download.service.ts",
+      "marker": "assembleAudiobook",
+      "title": "Requested audiobooks arrive as tagged m4b files with chapters",
+      "description": "A request plugin that serves a single audio file, such as the Storytel plugin, can now describe the book. The download is turned into an m4b with chapters, series, narrators, tags and cover before it is imported."
+    },
+    {
       "id": "whats-new",
       "file": "patches/whats-new-patch-notes.patch",
       "tests": "patches/whats-new-patch-notes-tests.patch",

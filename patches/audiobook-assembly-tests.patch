@@ -1,0 +1,310 @@
+diff --git a/server/src/modules/book-request/fulfillment/audiobook-assembly.test.ts b/server/src/modules/book-request/fulfillment/audiobook-assembly.test.ts
+new file mode 100644
+index 0000000..33a7b52
+--- /dev/null
++++ b/server/src/modules/book-request/fulfillment/audiobook-assembly.test.ts
+@@ -0,0 +1,197 @@
++import { execFileSync } from 'node:child_process';
++import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++
++import { extractAudioMetadata } from '../../metadata/extractors/audio.extractor';
++import {
++  ASSEMBLY_SPEC_FILE,
++  assembleAudiobook,
++  buildAssemblyArgs,
++  buildFfmetadata,
++  readAssemblySpec,
++  sanitizeAudiobookAssembly,
++  writeAssemblySpec,
++  type AudiobookAssembly,
++} from './audiobook-assembly';
++
++function assembly(over: Partial<AudiobookAssembly> = {}): AudiobookAssembly {
++  return {
++    title: 'Mördare utan ansikte',
++    subtitle: null,
++    authors: ['Henning Mankell'],
++    narrators: ['Reine Brynolfsson'],
++    seriesName: 'Wallander',
++    seriesIndex: '1',
++    publisher: null,
++    publishedDate: '1991',
++    description: null,
++    genres: ['Deckare'],
++    language: 'swe',
++    chapters: [
++      { title: 'Del 1', startMs: 0 },
++      { title: 'Del 2', startMs: 1000 },
++    ],
++    coverUrl: null,
++    ...over,
++  };
++}
++
++function hasFfmpeg(): boolean {
++  try {
++    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
++    execFileSync('ffprobe', ['-version'], { stdio: 'ignore' });
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++describe('sanitizeAudiobookAssembly', () => {
++  it('returns null for nothing worth assembling', () => {
++    expect(sanitizeAudiobookAssembly(undefined)).toBeNull();
++    expect(sanitizeAudiobookAssembly('book')).toBeNull();
++    expect(sanitizeAudiobookAssembly({ genres: ['x'] })).toBeNull();
++  });
++
++  it('keeps well-formed fields and drops malformed ones', () => {
++    const result = sanitizeAudiobookAssembly({
++      title: '  Title  ',
++      authors: ['A', 'A', 7, '', null],
++      seriesIndex: 3,
++      language: 'sv',
++      coverUrl: 'http://insecure.example/cover.jpg',
++      chapters: [
++        { title: 'Two', startMs: 2000 },
++        { title: 'One', startMs: 0 },
++        { title: 'Dup', startMs: 2000 },
++        { title: 'Bad', startMs: -1 },
++        { startMs: 4000.4 },
++        'nonsense',
++      ],
++    });
++
++    expect(result).toMatchObject({
++      title: 'Title',
++      authors: ['A', '7'],
++      seriesIndex: '3',
++      language: 'swe',
++      coverUrl: null,
++      chapters: [
++        { title: 'One', startMs: 0 },
++        { title: 'Two', startMs: 2000 },
++        { title: 'Chapter 3', startMs: 4000 },
++      ],
++    });
++  });
++
++  it('rejects an unknown two-letter language rather than guessing a three-letter one', () => {
++    expect(sanitizeAudiobookAssembly({ title: 'x', language: 'zz' })?.language).toBeNull();
++    expect(sanitizeAudiobookAssembly({ title: 'x', language: 'en-GB' })?.language).toBe('eng');
++  });
++
++  it('round-trips through the spec file and survives a corrupt one', async () => {
++    const directory = await mkdtemp(join(tmpdir(), 'bookorbit-assembly-'));
++    try {
++      await writeAssemblySpec(directory, assembly());
++      await expect(readAssemblySpec(directory)).resolves.toEqual(assembly());
++      await writeFile(join(directory, ASSEMBLY_SPEC_FILE), '{not json', 'utf8');
++      await expect(readAssemblySpec(directory)).resolves.toBeNull();
++    } finally {
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
++});
++
++describe('buildFfmetadata', () => {
++  it('writes the tags the audio extractor reads back, and escapes what ffmetadata treats as syntax', () => {
++    const text = buildFfmetadata(assembly({ description: 'a=b; #c\\d\ne' }), 5000);
++
++    expect(text.startsWith(';FFMETADATA1\n')).toBe(true);
++    expect(text).toContain('album=Mördare utan ansikte\n');
++    expect(text).toContain('album_artist=Henning Mankell\n');
++    expect(text).toContain('composer=Reine Brynolfsson\n');
++    expect(text).toContain('show=Wallander\n');
++    expect(text).toContain('episode_id=1\n');
++    expect(text).toContain('media_type=2\n');
++    expect(text).toContain('description=a\\=b\\; \\#c\\\\d\\\ne\n');
++    expect(text).toContain('[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=Del 1\n');
++    expect(text).toContain('START=1000\nEND=5000\ntitle=Del 2\n');
++  });
++
++  it('drops chapters that start past the end of the audio', () => {
++    const text = buildFfmetadata(
++      assembly({
++        chapters: [
++          { title: 'In', startMs: 0 },
++          { title: 'Out', startMs: 9000 },
++        ],
++      }),
++      5000,
++    );
++    expect(text).toContain('title=In');
++    expect(text).not.toContain('title=Out');
++  });
++
++  it('leaves out a series position without a series', () => {
++    expect(buildFfmetadata(assembly({ seriesName: null }), 5000)).not.toContain('episode_id');
++  });
++});
++
++describe('buildAssemblyArgs', () => {
++  const base = { source: '/s/book.mp3', metadataPath: '/s/meta.txt', output: '/s/out.m4b', assembly: assembly() };
++
++  it('stream-copies AAC', () => {
++    const args = buildAssemblyArgs({ ...base, coverPath: null, probe: { codec: 'aac', bitRateKbps: 128, durationMs: 1 } });
++    expect(args.join(' ')).toContain('-c:a copy');
++    expect(args).not.toContain('-b:a');
++  });
++
++  it('transcodes anything else at the source bitrate, within bounds', () => {
++    const low = buildAssemblyArgs({ ...base, coverPath: null, probe: { codec: 'mp3', bitRateKbps: 16, durationMs: 1 } });
++    const high = buildAssemblyArgs({ ...base, coverPath: null, probe: { codec: 'mp3', bitRateKbps: 320, durationMs: 1 } });
++    expect(low.join(' ')).toContain('-c:a aac -b:a 32k');
++    expect(high.join(' ')).toContain('-c:a aac -b:a 128k');
++  });
++
++  it('attaches the cover and the track language when there are any', () => {
++    const args = buildAssemblyArgs({ ...base, coverPath: '/s/cover.jpg', probe: { codec: 'aac', bitRateKbps: null, durationMs: 1 } }).join(' ');
++    expect(args).toContain('-i /s/cover.jpg');
++    expect(args).toContain('-map 2:v:0');
++    expect(args).toContain('-disposition:v:0 attached_pic');
++    expect(args).toContain('-metadata:s:a:0 language=swe');
++  });
++});
++
++describe.skipIf(!hasFfmpeg())('assembleAudiobook with a real ffmpeg', () => {
++  let directory: string;
++
++  beforeEach(async () => {
++    directory = await mkdtemp(join(tmpdir(), 'bookorbit-assembly-'));
++  });
++
++  afterEach(async () => {
++    await rm(directory, { recursive: true, force: true });
++  });
++
++  it('turns an MP3 into an m4b the audio extractor reads chapters, series and people from', async () => {
++    const source = join(directory, 'book.mp3');
++    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:a', 'libmp3lame', '-b:a', '64k', source]);
++    await writeAssemblySpec(directory, assembly());
++
++    const output = await assembleAudiobook(source, assembly(), AbortSignal.timeout(60_000));
++
++    expect(output).toBe(join(directory, 'book.m4b'));
++    expect(await readdir(directory)).toEqual(['book.m4b']);
++    const extracted = await extractAudioMetadata(output);
++    expect(extracted).toMatchObject({
++      title: 'Mördare utan ansikte',
++      authors: [{ name: 'Henning Mankell' }],
++      narrators: ['Reine Brynolfsson'],
++      seriesName: 'Wallander',
++      seriesIndex: '1',
++      genres: ['Deckare'],
++    });
++    expect(extracted?.chapters.map((chapter) => chapter.title)).toEqual(['Del 1', 'Del 2']);
++  });
++});
+diff --git a/server/src/modules/book-request/fulfillment/direct-download.service.test.ts b/server/src/modules/book-request/fulfillment/direct-download.service.test.ts
+index a8cc550..99a4468 100644
+--- a/server/src/modules/book-request/fulfillment/direct-download.service.test.ts
++++ b/server/src/modules/book-request/fulfillment/direct-download.service.test.ts
+@@ -12,6 +12,13 @@ vi.mock('undici', async (importOriginal) => ({
+   fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+ }));
+ 
++const assemble = vi.hoisted(() => vi.fn<(source: string) => Promise<string>>());
++
++vi.mock('./audiobook-assembly', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('./audiobook-assembly')>()),
++  assembleAudiobook: assemble,
++}));
++
+ import { Agent } from 'undici';
+ 
+ import { DirectDownloadService, stagedDirectFileName } from './direct-download.service';
+@@ -629,6 +636,61 @@ describe('DirectDownloadService', () => {
+     await expect(service.status([HASH])).resolves.toEqual([]);
+     await expect(stat(join(appDataPath, 'request-downloads', HASH))).rejects.toThrow();
+   });
++
++  describe('with an audiobook to assemble', () => {
++    const audiobook = {
++      title: 'Book',
++      subtitle: null,
++      authors: ['Author'],
++      narrators: [],
++      seriesName: null,
++      seriesIndex: null,
++      publisher: null,
++      publishedDate: null,
++      description: null,
++      genres: [],
++      language: null,
++      chapters: [{ title: 'One', startMs: 0 }],
++      coverUrl: null,
++    };
++
++    beforeEach(() => {
++      assemble.mockReset();
++    });
++
++    it('reports the assembled m4b as the content, not the file it downloaded', async () => {
++      assemble.mockImplementation((source) => Promise.resolve(source.replace(/\.mp3$/, '.m4b')));
++      fetchMock.mockResolvedValue(new Response('mp3 bytes', { headers: { 'content-type': 'audio/mpeg' } }));
++
++      await service.add({ fileUrl: 'https://archive.org/download/x/book.mp3', fileName: 'book.mp3', clientKey: HASH, audiobook });
++      const status = await settle();
++
++      expect(status.state).toBe('completed');
++      expect(status.contentPath).toBe(join(appDataPath, 'request-downloads', HASH, 'book.m4b'));
++      expect(assemble).toHaveBeenCalledWith(join(appDataPath, 'request-downloads', HASH, 'book.mp3'), audiobook, expect.any(AbortSignal));
++    });
++
++    it('fails the transfer with the reason when assembly fails', async () => {
++      assemble.mockRejectedValue(new Error('ffmpeg exited 1'));
++      fetchMock.mockResolvedValue(new Response('mp3 bytes', { headers: { 'content-type': 'audio/mpeg' } }));
++
++      await service.add({ fileUrl: 'https://archive.org/download/x/book.mp3', fileName: 'book.mp3', clientKey: HASH, audiobook });
++      const status = await settle();
++
++      expect(status.state).toBe('failed');
++      expect(status.errorMessage).toContain('ffmpeg exited 1');
++    });
++
++    it('leaves a download nobody described alone', async () => {
++      fetchMock.mockResolvedValue(new Response('mp3 bytes', { headers: { 'content-type': 'audio/mpeg' } }));
++
++      await service.add({ fileUrl: 'https://archive.org/download/x/book.mp3', fileName: 'book.mp3', clientKey: HASH });
++      const status = await settle();
++
++      expect(status.contentPath).toBe(join(appDataPath, 'request-downloads', HASH, 'book.mp3'));
++      expect(assemble).not.toHaveBeenCalled();
++    });
++  });
+ });
+ 
+ /**
+diff --git a/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts b/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts
+index 2cbed70..cbeba03 100644
+--- a/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts
++++ b/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts
+@@ -313,6 +313,22 @@ describe('PluginIndexerAdapter', () => {
+       ).rejects.toThrow();
+     });
+ 
++    it('passes audiobook details on only after sanitizing them', async () => {
++      const release = { indexerId: 4, guid: 'g', title: 't', sizeBytes: null, seeders: null, leechers: null };
++      const file = { url: 'https://cdn.example.com/book.mp3', fileName: 'book.mp3', sizeBytes: 1, format: 'mp3' };
++      const described = makeAdapter({
++        fetchTorrentFile: undefined,
++        resolveFile: () =>
++          Promise.resolve({ ...file, audiobook: { title: ' Book ', chapters: [{ title: 'One', startMs: 0 }], coverUrl: 'http://x/c.jpg' } }),
++      });
++      const bare = makeAdapter({ fetchTorrentFile: undefined, resolveFile: () => Promise.resolve({ ...file, audiobook: {} }) });
++
++      await expect(described.adapter.resolveFile!(release, config(), AbortSignal.timeout(1000))).resolves.toMatchObject({
++        audiobook: { title: 'Book', chapters: [{ title: 'One', startMs: 0 }], coverUrl: null },
++      });
++      await expect(bare.adapter.resolveFile!(release, config(), AbortSignal.timeout(1000))).resolves.toEqual(file);
++    });
++
+     it('treats a source DNS failure as a temporary outage', async () => {
+       vi.mocked(lookup).mockRejectedValueOnce(new Error('ENOTFOUND'));
+       const { adapter } = makeAdapter({

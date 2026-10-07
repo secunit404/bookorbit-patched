@@ -1,0 +1,557 @@
+diff --git a/packages/plugin-api/src/index.ts b/packages/plugin-api/src/index.ts
+index fe0ab8a..11c5f21 100644
+--- a/packages/plugin-api/src/index.ts
++++ b/packages/plugin-api/src/index.ts
+@@ -134,6 +134,32 @@ export interface PluginReleaseFile {
+   fileName: string;
+   sizeBytes: number | null;
+   format: string;
++  /**
++   * For a source serving one bare audio file: what it knows about the book. When present, the
++   * downloaded file is assembled into an m4b carrying these tags, chapters and cover before import.
++   */
++  audiobook?: PluginAudiobookAssembly;
++}
++
++/** Every field is optional; whatever is missing is simply not written. */
++export interface PluginAudiobookAssembly {
++  title?: string;
++  subtitle?: string;
++  authors?: string[];
++  narrators?: string[];
++  seriesName?: string;
++  seriesIndex?: string | number;
++  publisher?: string;
++  /** `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. */
++  publishedDate?: string;
++  description?: string;
++  genres?: string[];
++  /** ISO 639-1 or 639-2. */
++  language?: string;
++  /** Start offsets from the beginning of the file. Each chapter ends where the next begins. */
++  chapters?: { title: string; startMs: number }[];
++  /** HTTPS only, fetched without credentials. */
++  coverUrl?: string;
+ }
+ 
+ export interface PluginTestResult {
+diff --git a/server/src/modules/book-request/fulfillment/audiobook-assembly.ts b/server/src/modules/book-request/fulfillment/audiobook-assembly.ts
+new file mode 100644
+index 0000000..98d57d7
+--- /dev/null
++++ b/server/src/modules/book-request/fulfillment/audiobook-assembly.ts
+@@ -0,0 +1,338 @@
++import { execFile as execFileCallback } from 'node:child_process';
++import { readFile, rename, rm, writeFile } from 'node:fs/promises';
++import { basename, dirname, extname, join } from 'node:path';
++import { promisify } from 'node:util';
++import sharp from 'sharp';
++import { ISO_639_2_TO_1 } from '@bookorbit/types';
++
++import { readBoundedBytes } from '../../../common/utils/bounded-response';
++import { safeFetch } from '../../../common/utils/safe-fetch';
++
++const execFile = promisify(execFileCallback);
++
++/**
++ * What a source that serves a bare audio file knows about the book, so the file can be turned into
++ * the one shape BookOrbit reads in full: an m4b whose tags and chapter track carry it.
++ *
++ * Semantic fields rather than ffmpeg tag names, because which MP4 atom holds a narrator or a
++ * series position is this module's knowledge to keep, not every plugin's to rediscover.
++ */
++export interface AudiobookAssembly {
++  title: string | null;
++  subtitle: string | null;
++  authors: string[];
++  narrators: string[];
++  seriesName: string | null;
++  seriesIndex: string | null;
++  publisher: string | null;
++  publishedDate: string | null;
++  description: string | null;
++  genres: string[];
++  /** ISO 639-2, which is what an MP4 track's language field holds. */
++  language: string | null;
++  chapters: AudiobookChapter[];
++  coverUrl: string | null;
++}
++
++export interface AudiobookChapter {
++  title: string;
++  startMs: number;
++}
++
++/** Written beside the staged file so a transfer resumed after a restart still assembles. */
++export const ASSEMBLY_SPEC_FILE = '.bookorbit-audiobook.json';
++
++const MAX_TEXT_LENGTH = 1_000;
++const MAX_DESCRIPTION_LENGTH = 20_000;
++const MAX_PEOPLE = 20;
++const MAX_GENRES = 20;
++/** Far past any real book, low enough that a hostile list cannot become a payload. */
++const MAX_CHAPTERS = 2_000;
++const MAX_COVER_BYTES = 15 * 1024 * 1024;
++const COVER_TIMEOUT_MS = 30_000;
++const FFPROBE_TIMEOUT_MS = 60_000;
++/** A transcode of a forty-hour book on a slow NAS, with room to spare. */
++const FFMPEG_TIMEOUT_MS = 4 * 60 * 60 * 1000;
++const FFMPEG_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
++const DEFAULT_AAC_KBPS = 64;
++const MIN_AAC_KBPS = 32;
++const MAX_AAC_KBPS = 128;
++/** iTunes `stik` value for an audiobook, which is what makes players file it as one. */
++const MEDIA_TYPE_AUDIOBOOK = '2';
++
++/** `ISO_639_2_TO_1` leaves out codes whose three-letter form truncates to the two, so those are named here. */
++const ISO_639_1_TO_2: Record<string, string> = {
++  ...Object.fromEntries(Object.entries(ISO_639_2_TO_1).map(([three, two]) => [two, three])),
++  af: 'afr',
++  bs: 'bos',
++  en: 'eng',
++  eo: 'epo',
++  fr: 'fra',
++  ga: 'gle',
++  gl: 'glg',
++  la: 'lat',
++  lb: 'ltz',
++  mt: 'mlt',
++  nb: 'nob',
++  nn: 'nno',
++  sw: 'swa',
++  ta: 'tam',
++  te: 'tel',
++  ur: 'urd',
++};
++
++/**
++ * What a plugin handed over, reduced to what this module will act on. Null when there is nothing
++ * worth assembling, so a plugin that sends an empty object changes nothing about the download.
++ */
++export function sanitizeAudiobookAssembly(raw: unknown): AudiobookAssembly | null {
++  if (!raw || typeof raw !== 'object') return null;
++  const input = raw as Record<string, unknown>;
++
++  const assembly: AudiobookAssembly = {
++    title: text(input.title),
++    subtitle: text(input.subtitle),
++    authors: names(input.authors, MAX_PEOPLE),
++    narrators: names(input.narrators, MAX_PEOPLE),
++    seriesName: text(input.seriesName),
++    seriesIndex: text(input.seriesIndex),
++    publisher: text(input.publisher),
++    publishedDate: text(input.publishedDate),
++    description: text(input.description, MAX_DESCRIPTION_LENGTH),
++    genres: names(input.genres, MAX_GENRES),
++    language: languageCode(input.language),
++    chapters: chapters(input.chapters),
++    coverUrl: httpsUrl(input.coverUrl),
++  };
++
++  const hasAnything = assembly.title !== null || assembly.authors.length > 0 || assembly.chapters.length > 0 || assembly.coverUrl !== null;
++  return hasAnything ? assembly : null;
++}
++
++export async function writeAssemblySpec(directory: string, assembly: AudiobookAssembly): Promise<void> {
++  await writeFile(join(directory, ASSEMBLY_SPEC_FILE), JSON.stringify(assembly), 'utf8');
++}
++
++/** Re-sanitized on the way back in: the file sat on disk, and disk is not where trust comes from. */
++export async function readAssemblySpec(directory: string): Promise<AudiobookAssembly | null> {
++  try {
++    return sanitizeAudiobookAssembly(JSON.parse(await readFile(join(directory, ASSEMBLY_SPEC_FILE), 'utf8')));
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Turns the staged audio file into a tagged m4b with chapters and cover, beside it, and removes the
++ * original. Returns the path the import should read.
++ *
++ * AAC is stream-copied. Anything else is transcoded, because an m4b holding MP3 is a file most
++ * audiobook players refuse even though ffmpeg will happily write one.
++ */
++export async function assembleAudiobook(source: string, assembly: AudiobookAssembly, signal: AbortSignal): Promise<string> {
++  const directory = dirname(source);
++  const stem = basename(source, extname(source));
++  const output = join(directory, `${stem}.m4b`);
++  const partial = join(directory, `.${stem}.part.m4b`);
++  const metadataPath = join(directory, '.bookorbit-ffmetadata.txt');
++  const coverPath = join(directory, '.bookorbit-cover.jpg');
++
++  try {
++    const probe = await probeAudio(source, signal);
++    await writeFile(metadataPath, buildFfmetadata(assembly, probe.durationMs), 'utf8');
++    const hasCover = assembly.coverUrl !== null && (await saveCover(assembly.coverUrl, coverPath, signal));
++
++    await execFile(
++      ffmpegPath(),
++      buildAssemblyArgs({ source, metadataPath, coverPath: hasCover ? coverPath : null, output: partial, probe, assembly }),
++      {
++        maxBuffer: FFMPEG_MAX_BUFFER_BYTES,
++        timeout: FFMPEG_TIMEOUT_MS,
++        signal,
++      },
++    );
++    await rename(partial, output);
++    if (output !== source) await rm(source, { force: true });
++    return output;
++  } finally {
++    await Promise.all([partial, metadataPath, coverPath, join(directory, ASSEMBLY_SPEC_FILE)].map((path) => rm(path, { force: true })));
++  }
++}
++
++export interface AudioProbe {
++  codec: string | null;
++  bitRateKbps: number | null;
++  durationMs: number | null;
++}
++
++async function probeAudio(source: string, signal: AbortSignal): Promise<AudioProbe> {
++  const { stdout } = await execFile(
++    ffprobePath(),
++    ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_name,bit_rate:format=duration,bit_rate', '-of', 'json', source],
++    { timeout: FFPROBE_TIMEOUT_MS, signal },
++  );
++  const data = JSON.parse(String(stdout)) as {
++    streams?: { codec_name?: string; bit_rate?: string }[];
++    format?: { duration?: string; bit_rate?: string };
++  };
++  const stream = data.streams?.[0];
++  if (!stream) throw new Error('That download holds no audio stream');
++  const bitRate = Number(stream.bit_rate ?? data.format?.bit_rate);
++  const duration = Number(data.format?.duration);
++  return {
++    codec: stream.codec_name ?? null,
++    bitRateKbps: Number.isFinite(bitRate) && bitRate > 0 ? Math.round(bitRate / 1000) : null,
++    durationMs: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : null,
++  };
++}
++
++/**
++ * Never fatal: a book without its cover is still the book, and the import fetches a cover of its
++ * own from the metadata providers anyway.
++ */
++async function saveCover(url: string, path: string, signal: AbortSignal): Promise<boolean> {
++  try {
++    const response = await safeFetch(
++      url,
++      { headers: { Accept: 'image/*', 'User-Agent': 'BookOrbit' }, signal: AbortSignal.any([signal, AbortSignal.timeout(COVER_TIMEOUT_MS)]) },
++      { allowPrivate: false, pinResolvedAddress: true },
++    );
++    if (!response.ok) return false;
++    const bytes = await readBoundedBytes(response, MAX_COVER_BYTES);
++    await writeFile(path, await sharp(bytes).jpeg({ quality: 92 }).toBuffer());
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++/**
++ * The tags go in through an ffmetadata file rather than as `-metadata` arguments so that a
++ * description of any length and the chapter list travel the same way, and so nothing a source
++ * wrote is ever parsed as an option.
++ *
++ * Keys are the ones ffmpeg's MP4 muxer maps to iTunes atoms, which is also what the audio extractor
++ * reads back: `show` for the series and `episode_id` for its position, since a free-form `series`
++ * key is dropped from an MP4 without `use_metadata_tags`, and that flag cannot coexist with a cover.
++ */
++export function buildFfmetadata(assembly: AudiobookAssembly, durationMs: number | null): string {
++  const lines = [';FFMETADATA1'];
++  const tag = (key: string, value: string | null) => {
++    if (value) lines.push(`${key}=${escapeFfmetadata(value)}`);
++  };
++
++  const authors = assembly.authors.join(', ') || null;
++  tag('title', assembly.title);
++  tag('album', assembly.title);
++  tag('artist', authors);
++  tag('album_artist', authors);
++  tag('composer', assembly.narrators.join(', ') || null);
++  tag('show', assembly.seriesName);
++  tag('episode_id', assembly.seriesName ? assembly.seriesIndex : null);
++  tag('date', assembly.publishedDate);
++  tag('genre', assembly.genres.join(';') || null);
++  tag('description', assembly.description);
++  tag('comment', assembly.description);
++  tag('media_type', MEDIA_TYPE_AUDIOBOOK);
++
++  const ordered = assembly.chapters.filter((chapter) => durationMs === null || chapter.startMs < durationMs);
++  ordered.forEach((chapter, index) => {
++    const end = ordered[index + 1]?.startMs ?? durationMs ?? chapter.startMs + 1;
++    if (end <= chapter.startMs) return;
++    lines.push('[CHAPTER]', 'TIMEBASE=1/1000', `START=${chapter.startMs}`, `END=${end}`, `title=${escapeFfmetadata(chapter.title)}`);
++  });
++
++  return `${lines.join('\n')}\n`;
++}
++
++export function buildAssemblyArgs(input: {
++  source: string;
++  metadataPath: string;
++  coverPath: string | null;
++  output: string;
++  probe: AudioProbe;
++  assembly: AudiobookAssembly;
++}): string[] {
++  const args = ['-v', 'error', '-nostdin', '-y', '-i', input.source, '-f', 'ffmetadata', '-i', input.metadataPath];
++  if (input.coverPath) args.push('-i', input.coverPath);
++
++  args.push('-map', '0:a:0');
++  if (input.coverPath) args.push('-map', '2:v:0');
++  args.push('-map_metadata', '1', '-map_chapters', '1');
++
++  if (input.probe.codec === 'aac') {
++    args.push('-c:a', 'copy');
++  } else {
++    // Matched to the source, not raised: upsampling a low-bitrate MP3 costs disk for no audible gain.
++    const kbps = Math.min(MAX_AAC_KBPS, Math.max(MIN_AAC_KBPS, input.probe.bitRateKbps ?? DEFAULT_AAC_KBPS));
++    args.push('-c:a', 'aac', '-b:a', `${kbps}k`);
++  }
++  if (input.coverPath) args.push('-c:v', 'copy', '-disposition:v:0', 'attached_pic');
++  if (input.assembly.language) args.push('-metadata:s:a:0', `language=${input.assembly.language}`);
++
++  args.push('-movflags', '+faststart', '-f', 'mp4', input.output);
++  return args;
++}
++
++function escapeFfmetadata(value: string): string {
++  return value.replace(/[\\=;#\n]/g, (char) => `\\${char}`);
++}
++
++function text(value: unknown, maxLength = MAX_TEXT_LENGTH): string | null {
++  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
++  if (typeof value !== 'string') return null;
++  // eslint-disable-next-line no-control-regex -- stripping control characters is the point
++  const cleaned = value.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '').trim();
++  return cleaned ? cleaned.slice(0, maxLength) : null;
++}
++
++function names(value: unknown, max: number): string[] {
++  if (!Array.isArray(value)) return [];
++  const seen = new Set<string>();
++  for (const entry of value) {
++    const name = text(entry);
++    if (name) seen.add(name.replace(/\n/g, ' '));
++    if (seen.size >= max) break;
++  }
++  return [...seen];
++}
++
++function languageCode(value: unknown): string | null {
++  const code = typeof value === 'string' ? value.trim().toLowerCase().split(/[-_]/)[0] : '';
++  if (/^[a-z]{3}$/.test(code)) return code;
++  if (/^[a-z]{2}$/.test(code)) return ISO_639_1_TO_2[code] ?? null;
++  return null;
++}
++
++function chapters(value: unknown): AudiobookChapter[] {
++  if (!Array.isArray(value)) return [];
++  const parsed: { title: string | null; startMs: number }[] = [];
++  for (const entry of value.slice(0, MAX_CHAPTERS)) {
++    if (!entry || typeof entry !== 'object') continue;
++    const startMs = Number((entry as { startMs?: unknown }).startMs);
++    if (!Number.isFinite(startMs) || startMs < 0) continue;
++    parsed.push({ title: text((entry as { title?: unknown }).title)?.replace(/\n/g, ' ') ?? null, startMs: Math.round(startMs) });
++  }
++  parsed.sort((a, b) => a.startMs - b.startMs);
++  return parsed
++    .filter((chapter, index) => index === 0 || chapter.startMs > parsed[index - 1].startMs)
++    .map((chapter, index) => ({ title: chapter.title ?? `Chapter ${index + 1}`, startMs: chapter.startMs }));
++}
++
++function httpsUrl(value: unknown): string | null {
++  if (typeof value !== 'string') return null;
++  try {
++    const url = new URL(value.trim());
++    return url.protocol === 'https:' ? url.href : null;
++  } catch {
++    return null;
++  }
++}
++
++function ffmpegPath(): string {
++  return process.env.FFMPEG_PATH || 'ffmpeg';
++}
++
++function ffprobePath(): string {
++  return process.env.FFPROBE_PATH || 'ffprobe';
++}
+diff --git a/server/src/modules/book-request/fulfillment/direct-download.service.ts b/server/src/modules/book-request/fulfillment/direct-download.service.ts
+index f6e2cca..0784017 100644
+--- a/server/src/modules/book-request/fulfillment/direct-download.service.ts
++++ b/server/src/modules/book-request/fulfillment/direct-download.service.ts
+@@ -1,6 +1,6 @@
+ import { createWriteStream } from 'node:fs';
+ import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+-import { extname, join, resolve, sep } from 'node:path';
++import { dirname, extname, join, resolve, sep } from 'node:path';
+ 
+ import { Readable } from 'node:stream';
+ import { pipeline } from 'node:stream/promises';
+@@ -14,6 +14,7 @@ import { safeFetch } from '../../../common/utils/safe-fetch';
+ import { ensureSafeUrl } from '../../../common/utils/ssrf.utils';
+ import type { BookRequestDownloadRow } from '../../../db/schema';
+ import type { DownloadStatus } from '../download-clients/download-client-adapter';
++import { assembleAudiobook, readAssemblySpec, writeAssemblySpec, type AudiobookAssembly } from './audiobook-assembly';
+ import { BookRequestDownloadRepository } from './book-request-download.repository';
+ 
+ /**
+@@ -119,6 +120,8 @@ export interface DirectDownloadRequest {
+    * derives a stable digest of the URL, which keeps the duplicate-grab index meaningful.
+    */
+   clientKey: string;
++  /** Present for a bare audio file a source described, which is assembled into an m4b on arrival. */
++  audiobook?: AudiobookAssembly;
+ }
+ 
+ /**
+@@ -164,6 +167,7 @@ export class DirectDownloadService {
+     const target = safeJoin(directory, stagedDirectFileName(release.fileName, release.format));
+ 
+     await mkdir(directory, { recursive: true });
++    if (release.audiobook) await writeAssemblySpec(directory, release.audiobook);
+     this.start(release.downloadId, release.clientKey, url, target, directory, 0, null, null);
+ 
+     return { clientKey: release.clientKey };
+@@ -359,13 +363,7 @@ export class DirectDownloadService {
+ 
+     if (responseMeta.alreadyComplete) {
+       await response.body?.cancel().catch(() => {});
+-      this.progress.set(clientKey, {
+-        state: 'completed',
+-        downloadedBytes: offset,
+-        totalBytes: offset,
+-        contentPath: target,
+-        terminalAt: Date.now(),
+-      });
++      await this.complete(clientKey, target, offset, offset, signal);
+       return;
+     }
+ 
+@@ -454,14 +452,39 @@ export class DirectDownloadService {
+     if (totalBytes !== null && downloaded !== totalBytes) {
+       throw new Error(`That source ended after ${downloaded} of ${totalBytes} bytes`);
+     }
++    this.logger.log(`[direct_download.fetch] [end] key=${clientKey} bytes=${downloaded} - direct download finished`);
++    await this.complete(clientKey, target, downloaded, totalBytes ?? downloaded, signal);
++  }
++
++  /**
++   * Assembly runs before the transfer reports completed, so the import only ever sees the finished
++   * m4b. Until then the poll loop reads the transfer as still downloading at 99%.
++   */
++  private async complete(clientKey: string, target: string, downloadedBytes: number, totalBytes: number, signal: AbortSignal): Promise<void> {
++    let contentPath = target;
++    const assembly = await readAssemblySpec(dirname(target));
++    if (assembly) {
++      const started = Date.now();
++      this.logger.log(`[direct_download.assemble] [start] key=${clientKey} chapters=${assembly.chapters.length} - assembling an m4b`);
++      try {
++        contentPath = await assembleAudiobook(target, assembly, signal);
++      } catch (error) {
++        const message = error instanceof Error ? error.message : String(error);
++        this.logger.warn(
++          `[direct_download.assemble] [fail] key=${clientKey} durationMs=${Date.now() - started} error="${sanitizeLogValue(message)}" - m4b assembly failed`,
++        );
++        throw new Error(`The download finished but could not be assembled into an m4b: ${message}`, { cause: error });
++      }
++      this.logger.log(`[direct_download.assemble] [end] key=${clientKey} durationMs=${Date.now() - started} - m4b assembled`);
++    }
++
+     this.progress.set(clientKey, {
+       state: 'completed',
+-      downloadedBytes: downloaded,
+-      totalBytes: totalBytes ?? downloaded,
+-      contentPath: target,
++      downloadedBytes,
++      totalBytes,
++      contentPath,
+       terminalAt: Date.now(),
+     });
+-    this.logger.log(`[direct_download.fetch] [end] key=${clientKey} bytes=${downloaded} - direct download finished`);
+   }
+ 
+   /**
+diff --git a/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts b/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts
+index 74515ff..5bb4d9f 100644
+--- a/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts
++++ b/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts
+@@ -69,6 +69,7 @@ import { IndexerRegistry } from '../indexers/indexer-registry';
+ import { IndexerSearchService } from '../indexers/indexer-search.service';
+ import { interpretRelease, type ReleaseFileInput, type ReleasePlan } from '../../scanner/lib/release-plan';
+ import { resolveFormat } from '../indexers/release-scoring';
++import type { AudiobookAssembly } from './audiobook-assembly';
+ import { BookRequestDownloadRepository } from './book-request-download.repository';
+ import { DirectDownloadService, stagedDirectFileName } from './direct-download.service';
+ import { infoHashFromMagnet, magnetDisplayName, MAX_TORRENT_FILE_BYTES, torrentMetadataFromFile, type TorrentFileMetadata } from './torrent.utils';
+@@ -288,6 +289,7 @@ export class RequestFulfillmentService {
+           fileUrl: directUrl as string,
+           fileName: directFileName as string,
+           clientKey: grab.clientKey,
++          ...(grab.audiobook ? { audiobook: grab.audiobook } : {}),
+         });
+       } else {
+         const config = await this.clients.resolveConfig(client.id);
+@@ -677,6 +679,7 @@ export class RequestFulfillmentService {
+         source: 'direct_url',
+         fileUrl: file.url,
+         fileName,
++        ...(file.audiobook ? { audiobook: file.audiobook } : {}),
+         // A digest of the URL, because there is no infohash and the poll loop still needs a key.
+         clientKey: createHash('sha1').update(file.url).digest('hex'),
+         releaseFormat: file.format.slice(0, 20),
+@@ -941,6 +944,7 @@ interface ParsedGrab {
+   nzbFileName?: string;
+   fileUrl?: string;
+   fileName?: string;
++  audiobook?: AudiobookAssembly;
+   releaseTitle: string;
+   /** The size of what the release carries, which a magnet does not state. */
+   releaseSizeBytes: number | null;
+diff --git a/server/src/modules/book-request/indexers/indexer-adapter.ts b/server/src/modules/book-request/indexers/indexer-adapter.ts
+index b03bcab..b0e08fe 100644
+--- a/server/src/modules/book-request/indexers/indexer-adapter.ts
++++ b/server/src/modules/book-request/indexers/indexer-adapter.ts
+@@ -11,6 +11,8 @@ import type {
+   ReleaseAudioInfo,
+ } from '@bookorbit/types';
+ 
++import type { AudiobookAssembly } from '../fulfillment/audiobook-assembly';
++
+ /** An indexer row with its credential already decrypted. Never logged, never returned over HTTP. */
+ export interface ResolvedIndexerConfig {
+   id: number;
+@@ -160,6 +162,7 @@ export interface ReleaseFile {
+   /** Known here even where the search could not state one, since a single file has a real size. */
+   sizeBytes: number | null;
+   format: string;
++  audiobook?: AudiobookAssembly | null;
+ }
+ 
+ /** What a credentialed torrent download endpoint resolves to after redirects are followed. */
+diff --git a/server/src/modules/book-request/indexers/plugins/plugin-host.ts b/server/src/modules/book-request/indexers/plugins/plugin-host.ts
+index bffdf62..69c2a28 100644
+--- a/server/src/modules/book-request/indexers/plugins/plugin-host.ts
++++ b/server/src/modules/book-request/indexers/plugins/plugin-host.ts
+@@ -17,6 +17,7 @@ import { withDeadline } from '../../../../common/utils/with-deadline.utils';
+ import { ensureSafeUrl, RemoteHostResolutionException } from '../../../../common/utils/ssrf.utils';
+ import { buildSearchText } from '../search-text';
+ import { MAX_TORRENT_FILE_BYTES } from '../../fulfillment/torrent.utils';
++import { sanitizeAudiobookAssembly } from '../../fulfillment/audiobook-assembly';
+ import type { IndexerCredentialStore } from '../indexer-credential-store';
+ import {
+   IndexerSearchException,
+@@ -139,7 +140,9 @@ export class PluginIndexerAdapter implements IndexerAdapter {
+         }
+         throw error;
+       }
+-      return file;
++      const { audiobook, ...rest } = file;
++      const assembly = sanitizeAudiobookAssembly(audiobook);
++      return assembly ? { ...rest, audiobook: assembly } : rest;
+     };
+   }
+ 
