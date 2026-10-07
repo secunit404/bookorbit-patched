@@ -19,10 +19,31 @@ there.
 | id | what it fixes |
 |---|---|
 | `kobo-seed` | A new Kobo entitlement is seeded from stored reading progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device the book is at 0%, the device opens at the start and reports a fresh low percentage, and that newer timestamp overwrites the real progress in BookOrbit. |
+| `audiobook-assembly` | Lets a request plugin that serves one bare audio file attach the book's details (`PluginReleaseFile.audiobook`). After the direct download finishes, ffmpeg builds an m4b with chapters, series, narrators, tags and cover, stream-copying AAC and transcoding anything else, before the import sees it. Used by `plugins/storytel`. |
 | `whats-new` | Pins the patch list to the top of the What's New tab, fed from this manifest at build time. The popup path is untouched and keeps showing upstream releases only. |
 
 Each patch has a matching `*-tests.patch` holding its unit tests. Those are kept for
 reference only — the image build applies the code patches alone.
+
+## Storytel plugin
+
+`plugins/storytel/index.mjs` is a request indexer plugin that searches Storytel and downloads
+audiobooks from your own subscription. It needs this image for the `audiobook-assembly` patch;
+on stock BookOrbit it still downloads, but as a bare MP3 without chapters.
+
+1. Settings > System > Requests > install plugin, and upload `index.mjs` (or copy it to
+   `/data/plugins/indexers/storytel/index.mjs` and restart).
+2. Add a Storytel indexer: your Storytel password in the API key field, the e-mail, your store
+   (`STHP-SE` for Sweden) and the languages to search.
+3. Request an audiobook as usual. Picking a Storytel release adds the book to your Storytel
+   bookshelf, downloads it, and the import receives an m4b with chapters, series, narrators and cover.
+
+Search uses Storytel's public catalogue and never logs in. The account is only used when a release
+is grabbed: one reused session, grabs one at a time, capped per day and spaced out (both
+configurable), and an hour's pause after a Cloudflare block or rate limit. That lowers the risk of
+Storytel flagging the account; it does not remove it.
+
+`node plugins/storytel/verify.mjs` runs its checks against saved Storytel responses.
 
 ## How it builds
 
