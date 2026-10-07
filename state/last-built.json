@@ -1,11 +1,12 @@
 {
-  "image": "ghcr.io/secunit404/bookorbit-patched:v3.2.0",
-  "tag": "v3.2.0",
-  "upstream": "bookorbit/bookorbit@v3.2.0",
-  "patches_sha": "66b17bf092e03f85",
+  "image": "ghcr.io/secunit404/bookorbit-patched:v3.3.0",
+  "tag": "v3.3.0",
+  "upstream": "bookorbit/bookorbit@v3.3.0",
+  "patches_sha": "27ad58f69e529128",
   "applied": [
     "kobo-seed",
+    "audiobook-assembly",
     "whats-new"
   ],
-  "built_at": "2026-10-01T11:06:02Z"
+  "built_at": "2026-10-07T19:57:23Z"
 }
