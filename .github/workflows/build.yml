@@ -154,11 +154,12 @@ jobs:
           echo "applied=$(IFS=.; echo "${APPLIED[*]}")" >> "$GITHUB_OUTPUT"
 
           # What the whats-new patch renders in the tab. Built from the patches that actually
-          # went in, so a patch upstream has since shipped stops being advertised as ours.
+          # went in, so a patch upstream has since shipped stops being advertised as ours. The
+          # whats-new patch itself is left out: it is the list, not a change worth listing.
           printf '%s\n' "${APPLIED[@]}" \
             | jq -R . \
             | jq -s --slurpfile m "${MANIFEST}" \
-                '[ .[] as $id | $m[0].patches[] | select(.id == $id) | {title, body: .description} ]' \
+                '[ .[] as $id | $m[0].patches[] | select(.id == $id and .id != "whats-new") | {title, body: .description} ]' \
             | jq -c . > /tmp/patch-notes.json
           echo "notes=$(cat /tmp/patch-notes.json)" >> "$GITHUB_OUTPUT"
 

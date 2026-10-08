@@ -21,7 +21,7 @@ there.
 | `kobo-seed` | A new Kobo entitlement is seeded from stored reading progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device the book is at 0%, the device opens at the start and reports a fresh low percentage, and that newer timestamp overwrites the real progress in BookOrbit. |
 | `audiobook-assembly` | Lets a request plugin that serves one bare audio file attach the book's details (`PluginReleaseFile.audiobook`). After the direct download finishes, ffmpeg builds an m4b with chapters, series, narrators, tags and cover, stream-copying AAC and transcoding anything else, before the import sees it. Used by [bookorbit-storytel](https://github.com/secunit404/bookorbit-storytel). |
 | `direct-download-score` | A release from a source that serves the file itself (a plugin with `resolveFile`) gets a `directDownload` score reason worth the full seeder weight instead of no seeder score at all, so a direct source is not outranked by any torrent with a few peers. |
-| `whats-new` | Pins the patch list to the top of the What's New tab, fed from this manifest at build time. The popup path is untouched and keeps showing upstream releases only. |
+| `whats-new` | Pins the patch list to the top of the What's New tab, fed from this manifest at build time. It does not list itself. The popup path is untouched and keeps showing upstream releases only. |
 
 Each patch has a matching `*-tests.patch` holding its unit tests. Those are kept for
 reference only — the image build applies the code patches alone.
