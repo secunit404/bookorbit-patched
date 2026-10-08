@@ -19,6 +19,15 @@
       "description": "A request plugin that serves a single audio file, such as the Storytel plugin, can now describe the book. The download is turned into an m4b with chapters, series, narrators, tags and cover before it is imported."
     },
     {
+      "id": "direct-download-score",
+      "file": "patches/direct-download-score.patch",
+      "tests": "patches/direct-download-score-tests.patch",
+      "target": "server/src/modules/book-request/indexers/release-scoring.ts",
+      "marker": "directDownload",
+      "title": "Direct downloads are no longer ranked below torrents for having no seeders",
+      "description": "A source that serves the file itself, such as Storytel or Library Genesis, now earns the full availability score a well-seeded torrent gets, shown as \"Direct download\" in the score breakdown. Before, it scored nothing there and lost to any torrent with a few peers."
+    },
+    {
       "id": "whats-new",
       "file": "patches/whats-new-patch-notes.patch",
       "tests": "patches/whats-new-patch-notes-tests.patch",

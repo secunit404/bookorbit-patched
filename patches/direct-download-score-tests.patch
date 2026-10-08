@@ -1,0 +1,49 @@
+diff --git a/server/src/modules/book-request/indexers/indexer-search.service.test.ts b/server/src/modules/book-request/indexers/indexer-search.service.test.ts
+index 2bf4e64..a7ea523 100644
+--- a/server/src/modules/book-request/indexers/indexer-search.service.test.ts
++++ b/server/src/modules/book-request/indexers/indexer-search.service.test.ts
+@@ -186,6 +186,24 @@ describe('IndexerSearchService', () => {
+     expect(result.releases[0].score).toBeGreaterThan(result.releases[1].score);
+   });
+ 
++  it('scores a source that serves the file itself as a direct download rather than by seeders', async () => {
++    const torznab = { search: vi.fn().mockResolvedValue([release({ seeders: 11 })]) };
++    const storytel = {
++      search: vi.fn().mockResolvedValue([release({ indexerId: 2, guid: 'g2', seeders: null })]),
++      resolveFile: vi.fn(),
++      seedsBack: false,
++    };
++    const { service } = makeService([indexer(), indexer({ id: 2, name: 'storytel', adapterType: 'storytel' })], { torznab, storytel });
++
++    const result = await service.search(request());
++    const direct = result.releases.find((item) => item.indexerName === 'storytel')!;
++    const torrent = result.releases.find((item) => item.indexerName === 'jackett')!;
++
++    expect(direct.reasons.map((reason) => reason.code)).toContain('directDownload');
++    expect(torrent.reasons.map((reason) => reason.code)).not.toContain('directDownload');
++    expect(direct.score).toBeGreaterThan(torrent.score);
++  });
++
+   it('records the outcome of every source that took part in a real search', async () => {
+     const torznab = { search: vi.fn().mockResolvedValue([release()]) };
+     const archive = { search: vi.fn().mockRejectedValue(new Error('tracker is offline')) };
+diff --git a/server/src/modules/book-request/indexers/release-scoring.test.ts b/server/src/modules/book-request/indexers/release-scoring.test.ts
+index b40a479..997f521 100644
+--- a/server/src/modules/book-request/indexers/release-scoring.test.ts
++++ b/server/src/modules/book-request/indexers/release-scoring.test.ts
+@@ -279,6 +279,15 @@ describe('scoreRelease', () => {
+     expect(scored.reasons.some((reason) => reason.code === 'seeders')).toBe(false);
+   });
+ 
++  it('gives a direct download the full availability weight a saturated swarm would get', () => {
++    const direct = scoreRelease(release({ seeders: null }), request(), { directDownload: true });
++    const swarm = scoreRelease(release({ seeders: 400 }), request());
++
++    expect(pointsFor(direct, 'directDownload')).toBe(pointsFor(swarm, 'seeders'));
++    expect(direct.score).toBe(swarm.score);
++    expect(direct.reasons.some((reason) => reason.code === 'seeders')).toBe(false);
++  });
++
+   it('penalises a size that cannot be the requested medium', () => {
+     const sample = scoreRelease(release({ sizeBytes: 4 * 1024 }), request());
+ 

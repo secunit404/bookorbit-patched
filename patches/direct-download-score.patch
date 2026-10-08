@@ -1,0 +1,78 @@
+diff --git a/client/src/locales/en.json b/client/src/locales/en.json
+index df88968..e3ee6c3 100644
+--- a/client/src/locales/en.json
++++ b/client/src/locales/en.json
+@@ -7478,6 +7478,7 @@
+         "expectedSize": "Plausible size",
+         "suspiciousSize": "Unlikely size {detail}",
+         "seeders": "{detail} seeders",
++        "directDownload": "Direct download",
+         "freeleech": "Freeleech",
+         "likelySeveralBooks": "{detail} files, may be several books"
+       },
+diff --git a/packages/types/src/indexer.ts b/packages/types/src/indexer.ts
+index c8b4e3b..e4a8de1 100644
+--- a/packages/types/src/indexer.ts
++++ b/packages/types/src/indexer.ts
+@@ -369,6 +369,7 @@ export const RELEASE_SCORE_REASONS = [
+   "expectedSize",
+   "suspiciousSize",
+   "seeders",
++  "directDownload",
+   "freeleech",
+   "likelySeveralBooks",
+ ] as const;
+diff --git a/server/src/modules/book-request/indexers/indexer-search.service.ts b/server/src/modules/book-request/indexers/indexer-search.service.ts
+index 49ede6c..54c3423 100644
+--- a/server/src/modules/book-request/indexers/indexer-search.service.ts
++++ b/server/src/modules/book-request/indexers/indexer-search.service.ts
+@@ -102,6 +102,7 @@ export class IndexerSearchService {
+     for (const { config, releases, query: indexerQuery, failure, error } of outcomes) {
+       const seedsBack = this.registry.seedsBack(config.adapterType);
+       const delivery = this.registry.delivery(config.adapterType);
++      const directDownload = this.registry.find(config.adapterType)?.resolveFile !== undefined;
+       if (failure) {
+         statuses.push({
+           indexerId: config.id,
+@@ -140,7 +141,11 @@ export class IndexerSearchService {
+           if (candidates.has(key)) continue;
+ 
+           candidates.set(key, candidate);
+-          scored.push({ scored: scoreRelease(candidate, scoringRequest), indexerName: config.name, managerPriority: config.managerPriority });
++          scored.push({
++            scored: scoreRelease(candidate, scoringRequest, { directDownload }),
++            indexerName: config.name,
++            managerPriority: config.managerPriority,
++          });
+           kept++;
+         }
+       } catch (error) {
+diff --git a/server/src/modules/book-request/indexers/release-scoring.ts b/server/src/modules/book-request/indexers/release-scoring.ts
+index 5f718b4..8718d15 100644
+--- a/server/src/modules/book-request/indexers/release-scoring.ts
++++ b/server/src/modules/book-request/indexers/release-scoring.ts
+@@ -175,7 +175,12 @@ export interface ScoredRelease {
+   reasons: ReleaseScoreReason[];
+ }
+ 
+-export function scoreRelease(candidate: ReleaseCandidate, request: ScoringRequest): ScoredRelease {
++/**
++ * `directDownload` is for a source that serves the file itself. It has no swarm, so the seeder
++ * weight would otherwise be lost to it outright, though nothing is more certain to finish: scored
++ * by seeders alone, a subscription's own copy loses to any torrent with a handful of peers.
++ */
++export function scoreRelease(candidate: ReleaseCandidate, request: ScoringRequest, source: { directDownload?: boolean } = {}): ScoredRelease {
+   const reasons: ReleaseScoreReason[] = [];
+ 
+   reasons.push(matchReason(candidate, request));
+@@ -184,7 +189,9 @@ export function scoreRelease(candidate: ReleaseCandidate, request: ScoringReques
+   const sizeReason = sizeReasonFor(candidate, request);
+   if (sizeReason) reasons.push(sizeReason);
+ 
+-  if (candidate.seeders !== null) {
++  if (source.directDownload) {
++    reasons.push({ code: 'directDownload', points: WEIGHTS.seeders });
++  } else if (candidate.seeders !== null) {
+     reasons.push({ code: 'seeders', points: round(seederScore(candidate.seeders)), detail: String(candidate.seeders) });
+   }
+ 
