@@ -1,15 +1,6 @@
 {
   "patches": [
     {
-      "id": "kobo-seed",
-      "file": "patches/kobo-reading-state-seed.patch",
-      "tests": "patches/kobo-reading-state-seed-tests.patch",
-      "target": "server/src/modules/kobo/services/kobo-sync.service.ts",
-      "marker": "buildSeedState",
-      "title": "Kobo keeps your reading progress on first sync",
-      "description": "A new Kobo entitlement is built from your stored progress instead of hardcoded zeros. Without it the first sync of an already-started book tells the device you are at 0%, and the position the device then reports overwrites the real one."
-    },
-    {
       "id": "audiobook-assembly",
       "file": "patches/audiobook-assembly.patch",
       "tests": "patches/audiobook-assembly-tests.patch",
