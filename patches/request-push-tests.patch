@@ -1,0 +1,492 @@
+diff --git a/client/src/features/settings/__tests__/RequestPushPanel.spec.ts b/client/src/features/settings/__tests__/RequestPushPanel.spec.ts
+new file mode 100644
+index 0000000..c4a7ca0
+--- /dev/null
++++ b/client/src/features/settings/__tests__/RequestPushPanel.spec.ts
+@@ -0,0 +1,109 @@
++import { flushPromises, mount } from '@vue/test-utils'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { NotificationType } from '@bookorbit/types'
++import type { BookRequestPushSettings } from '@bookorbit/types'
++
++const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn<(url: string, init?: RequestInit) => Promise<Response>>() }))
++
++vi.mock('@/lib/api', () => ({ api: apiMock }))
++vi.mock('vue-sonner', () => ({ toast: { success: vi.fn<(message: string) => void>(), error: vi.fn<(message: string) => void>() } }))
++
++import { toast } from 'vue-sonner'
++import RequestPushPanel from '../RequestPushPanel.vue'
++
++const PATH = '/api/v1/admin/book-request-push'
++
++function settings(overrides: Partial<BookRequestPushSettings> = {}): BookRequestPushSettings {
++  return {
++    enabled: false,
++    events: [NotificationType.BookRequestFailed],
++    priority: 0,
++    hasAppToken: false,
++    hasUserKey: false,
++    encryptionConfigured: true,
++    ...overrides,
++  }
++}
++
++function response(body: unknown, ok = true): Response {
++  return { ok, status: ok ? 200 : 500, json: vi.fn<() => Promise<unknown>>().mockResolvedValue(body) } as unknown as Response
++}
++
++async function mountPanel(loaded = settings()) {
++  apiMock.mockImplementation(async (_url, init) => response(init?.method === 'PUT' ? { ...loaded, ...JSON.parse(String(init.body)) } : loaded))
++  const wrapper = mount(RequestPushPanel)
++  await flushPromises()
++  return wrapper
++}
++
++function lastCall(): [string, Record<string, unknown>] {
++  const [url, init] = apiMock.mock.calls.at(-1)!
++  return [url, JSON.parse(String(init?.body)) as Record<string, unknown>]
++}
++
++function buttonByText(wrapper: Awaited<ReturnType<typeof mountPanel>>, text: string) {
++  return wrapper.findAll('button').find((b) => b.text().includes(text))!
++}
++
++describe('RequestPushPanel', () => {
++  beforeEach(() => {
++    apiMock.mockReset()
++    vi.mocked(toast.success).mockClear()
++    vi.mocked(toast.error).mockClear()
++  })
++
++  it('keeps the switch off until both keys are stored', async () => {
++    const wrapper = await mountPanel()
++
++    expect(wrapper.find('[aria-label="Send push notifications"]').attributes('disabled')).toBeDefined()
++  })
++
++  it('saves only the keys that were typed', async () => {
++    const wrapper = await mountPanel(settings({ hasUserKey: true }))
++
++    await wrapper.find('#push-app-token').setValue('app-token')
++    await buttonByText(wrapper, 'Save keys').trigger('click')
++    await flushPromises()
++
++    expect(lastCall()).toEqual([PATH, { appToken: 'app-token' }])
++    expect((wrapper.find('#push-app-token').element as HTMLInputElement).value).toBe('')
++  })
++
++  it('adds an event when its switch is turned on', async () => {
++    const wrapper = await mountPanel()
++
++    await wrapper.find('[aria-label="A request is submitted"]').trigger('click')
++    await flushPromises()
++
++    expect(lastCall()[1]).toEqual({ events: [NotificationType.BookRequestFailed, NotificationType.BookRequestSubmitted] })
++  })
++
++  it('tests with typed keys before they are saved', async () => {
++    const wrapper = await mountPanel(settings({ hasUserKey: true }))
++    apiMock.mockResolvedValueOnce(response({ ok: true }))
++
++    await wrapper.find('#push-app-token').setValue('typed')
++    await buttonByText(wrapper, 'Send test').trigger('click')
++    await flushPromises()
++
++    expect(lastCall()).toEqual([`${PATH}/test`, { appToken: 'typed' }])
++    expect(toast.success).toHaveBeenCalledWith('Test notification sent')
++  })
++
++  it("shows Pushover's reason when a test fails", async () => {
++    const wrapper = await mountPanel(settings({ hasAppToken: true, hasUserKey: true }))
++    apiMock.mockResolvedValueOnce(response({ ok: false, error: 'user key is invalid' }))
++
++    await buttonByText(wrapper, 'Send test').trigger('click')
++    await flushPromises()
++
++    expect(toast.error).toHaveBeenCalledWith('Test notification failed: user key is invalid')
++  })
++
++  it('reports a missing encryption key to the page', async () => {
++    const wrapper = await mountPanel(settings({ encryptionConfigured: false }))
++
++    expect(wrapper.emitted('encryptionState')).toEqual([[false]])
++    expect(wrapper.find('#push-app-token').attributes('disabled')).toBeDefined()
++  })
++})
+diff --git a/client/src/features/settings/__tests__/RequestsSettings.spec.ts b/client/src/features/settings/__tests__/RequestsSettings.spec.ts
+index 1c7c0b6..fc122ce 100644
+--- a/client/src/features/settings/__tests__/RequestsSettings.spec.ts
++++ b/client/src/features/settings/__tests__/RequestsSettings.spec.ts
+@@ -29,6 +29,7 @@ const stubs = {
+   RequestIndexersPanel: { template: '<div>sources panel</div>' },
+   DownloadClientsPanel: { template: '<div>clients panel</div>' },
+   RequestAutomationPanel: { template: '<div>automation panel</div>' },
++  RequestPushPanel: { template: '<div>notifications panel</div>' },
+ }
+ 
+ function mountPage(tab?: string) {
+@@ -42,7 +43,7 @@ describe('RequestsSettings', () => {
+     const wrapper = mountPage()
+ 
+     const labels = wrapper.findAll('[role="tab"]').map((tab) => tab.text())
+-    expect(labels).toEqual(['Sources', 'Download clients', 'Automation'])
++    expect(labels).toEqual(['Sources', 'Download clients', 'Automation', 'Notifications'])
+   })
+ 
+   /** Only the panel being looked at, so three concurrent loads do not happen on every visit. */
+@@ -67,6 +68,13 @@ describe('RequestsSettings', () => {
+     expect(routerState.replacedQuery).toEqual({ tab: 'sources' })
+   })
+ 
++  it('opens the notifications tab from a push notification link', () => {
++    const wrapper = mountPage('notifications')
++
++    expect(wrapper.text()).toContain('notifications panel')
++    expect(wrapper.text()).not.toContain('automation panel')
++  })
++
+   it('falls back to the first tab when the query names one that does not exist', () => {
+     const wrapper = mountPage('nonsense')
+ 
+diff --git a/server/src/modules/book-request/book-request-notifier.service.test.ts b/server/src/modules/book-request/book-request-notifier.service.test.ts
+index 193e503..828d296 100644
+--- a/server/src/modules/book-request/book-request-notifier.service.test.ts
++++ b/server/src/modules/book-request/book-request-notifier.service.test.ts
+@@ -19,9 +19,11 @@ function makeNotifier(
+     hasAnyContentFilters: vi.fn().mockResolvedValue(new Set(restricted)),
+     findExemptUserIds: vi.fn().mockResolvedValue(new Set(exempt)),
+   };
++  const push = { forward: vi.fn().mockResolvedValue(undefined) };
+   return {
+-    notifier: new BookRequestNotifier(notifications as never, repo as never, libraries as never, contentFilters as never),
++    notifier: new BookRequestNotifier(notifications as never, repo as never, libraries as never, contentFilters as never, push as never),
+     notifications,
++    push,
+     repo,
+     libraries,
+     contentFilters,
+@@ -127,3 +129,45 @@ describe('BookRequestNotifier.notifyBookAvailable content restrictions', () => {
+     expect(notifications.notify).toHaveBeenCalledWith(expect.objectContaining({ actionUrl: '/book/55', scope: { kind: 'user', userId: 3 } }));
+   });
+ });
++
++describe('BookRequestNotifier push forwarding', () => {
++  it('pushes an approver notification once', async () => {
++    const { notifier, push } = makeNotifier();
++
++    await notifier.notifyApprovers(NotificationType.BookRequestSubmitted, payload);
++
++    expect(push.forward).toHaveBeenCalledExactlyOnceWith(NotificationType.BookRequestSubmitted, payload);
++  });
++
++  it('pushes a failed self-serve request even though approvers are not told in the app', async () => {
++    const { notifier, push } = makeNotifier([3, 4]);
++
++    await notifier.notifyResponsible({ id: 7, selfServe: true }, NotificationType.BookRequestFailed, payload);
++
++    expect(push.forward).toHaveBeenCalledExactlyOnceWith(NotificationType.BookRequestFailed, payload);
++  });
++
++  it('pushes a failed ordinary request once, not once per approver path', async () => {
++    const { notifier, push } = makeNotifier();
++
++    await notifier.notifyResponsible({ id: 7, selfServe: false }, NotificationType.BookRequestFailed, payload);
++
++    expect(push.forward).toHaveBeenCalledTimes(1);
++  });
++
++  it('pushes an arrival once however many users are interested', async () => {
++    const { notifier, push } = makeNotifier([3, 4, 5]);
++
++    await notifier.notifyBookAvailable(7, 11, payload);
++
++    expect(push.forward).toHaveBeenCalledExactlyOnceWith(NotificationType.BookRequestAvailable, payload);
++  });
++
++  it('does not push approvals or rejections, which are news for the requester', async () => {
++    const { notifier, push } = makeNotifier();
++
++    await notifier.notifyInterested(7, NotificationType.BookRequestApproved, payload);
++
++    expect(push.forward).not.toHaveBeenCalled();
++  });
++});
+diff --git a/server/src/modules/book-request/book-request.service.test.ts b/server/src/modules/book-request/book-request.service.test.ts
+index cae5959..bd560df 100644
+--- a/server/src/modules/book-request/book-request.service.test.ts
++++ b/server/src/modules/book-request/book-request.service.test.ts
+@@ -145,7 +145,13 @@ function makeService(
+     hasAnyContentFilters: vi.fn().mockResolvedValue(new Set<number>()),
+     findExemptUserIds: vi.fn().mockResolvedValue(new Set<number>()),
+   };
+-  const notifier = new BookRequestNotifier(notifications as never, repo as never, libraryService as never, contentFilterRepo as never);
++  const notifier = new BookRequestNotifier(
++    notifications as never,
++    repo as never,
++    libraryService as never,
++    contentFilterRepo as never,
++    { forward: vi.fn() } as never,
++  );
+   const downloads = {
+     findLatestForRequests: vi.fn().mockResolvedValue(new Map()),
+     findById: vi.fn().mockResolvedValue({ id: 11, requestId: 10, status: 'downloading' }),
+diff --git a/server/src/modules/book-request/push/pushover.client.test.ts b/server/src/modules/book-request/push/pushover.client.test.ts
+new file mode 100644
+index 0000000..77b5eae
+--- /dev/null
++++ b/server/src/modules/book-request/push/pushover.client.test.ts
+@@ -0,0 +1,48 @@
++import { PushoverClient, PushoverError } from './pushover.client';
++
++const msg = { appToken: 'app', userKey: 'user', title: 'Failed', message: 'Dune', priority: 1, url: 'https://books.example.com/requests' };
++
++describe('PushoverClient', () => {
++  afterEach(() => vi.unstubAllGlobals());
++
++  it('posts the message form-encoded', async () => {
++    const fetch = vi.fn().mockResolvedValue(new Response('{"status":1}', { status: 200 }));
++    vi.stubGlobal('fetch', fetch);
++
++    await new PushoverClient().send(msg);
++
++    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
++    expect(url).toBe('https://api.pushover.net/1/messages.json');
++    expect(Object.fromEntries(init.body as URLSearchParams)).toEqual({
++      token: 'app',
++      user: 'user',
++      title: 'Failed',
++      message: 'Dune',
++      priority: '1',
++      url: 'https://books.example.com/requests',
++    });
++  });
++
++  it('cuts text to the lengths Pushover accepts', async () => {
++    const fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
++    vi.stubGlobal('fetch', fetch);
++
++    await new PushoverClient().send({ ...msg, title: 't'.repeat(300), message: 'm'.repeat(2000) });
++
++    const body = (fetch.mock.calls[0] as [string, RequestInit])[1].body as URLSearchParams;
++    expect(body.get('title')).toHaveLength(250);
++    expect(body.get('message')).toHaveLength(1024);
++  });
++
++  it('reports the errors Pushover names', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"status":0,"errors":["user key is invalid"]}', { status: 400 })));
++
++    await expect(new PushoverClient().send(msg)).rejects.toThrow(new PushoverError('user key is invalid'));
++  });
++
++  it('reports a network failure', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ENOTFOUND')));
++
++    await expect(new PushoverClient().send(msg)).rejects.toThrow(/could not be reached: ENOTFOUND/);
++  });
++});
+diff --git a/server/src/modules/book-request/push/request-push.service.test.ts b/server/src/modules/book-request/push/request-push.service.test.ts
+new file mode 100644
+index 0000000..2fb0a5b
+--- /dev/null
++++ b/server/src/modules/book-request/push/request-push.service.test.ts
+@@ -0,0 +1,200 @@
++import { BadRequestException } from '@nestjs/common';
++import { BOOK_REQUEST_PUSH_SETTING_KEYS as KEYS, NotificationType } from '@bookorbit/types';
++
++import { PushoverError } from './pushover.client';
++import { RequestPushService } from './request-push.service';
++
++function makeService(initial: Record<string, string> = {}, { encryption = true } = {}) {
++  const store = new Map(Object.entries(initial));
++  const appSettings = {
++    getValues: vi.fn((keys: string[]) => Promise.resolve(new Map(keys.filter((k) => store.has(k)).map((k) => [k, store.get(k)!])))),
++    setValue: vi.fn((key: string, value: string) => {
++      store.set(key, value);
++      return Promise.resolve();
++    }),
++  };
++  const credentials = {
++    isConfigured: () => encryption,
++    encrypt: vi.fn((plain: string) => {
++      if (!encryption) throw new BadRequestException({ message: 'Set BOOK_REQUEST_ENCRYPTION_KEY', errorCode: 'REQUEST_ENCRYPTION_KEY_MISSING' });
++      return `enc:${plain}`;
++    }),
++    decrypt: vi.fn((cipher: string) => cipher.replace(/^enc:/, '')),
++  };
++  const pushover = { send: vi.fn().mockResolvedValue(undefined) };
++  const config = { get: vi.fn().mockReturnValue('https://books.example.com/') };
++  const service = new RequestPushService(appSettings as never, credentials as never, pushover as never, config as never);
++  return { service, store, pushover, credentials };
++}
++
++const configured = {
++  [KEYS.ENABLED]: 'true',
++  [KEYS.APP_TOKEN]: 'enc:app',
++  [KEYS.USER_KEY]: 'enc:user',
++};
++
++describe('RequestPushService.get', () => {
++  it('defaults to off with failures, reviews and missing releases selected', async () => {
++    const { service } = makeService();
++
++    expect(await service.get()).toEqual({
++      enabled: false,
++      events: [NotificationType.BookRequestFailed, NotificationType.BookRequestNeedsReview, NotificationType.BookRequestNeedsRelease],
++      priority: 0,
++      hasAppToken: false,
++      hasUserKey: false,
++      encryptionConfigured: true,
++    });
++  });
++
++  it('reports stored keys without returning them', async () => {
++    const { service } = makeService(configured);
++
++    const settings = await service.get();
++
++    expect(settings).toMatchObject({ hasAppToken: true, hasUserKey: true });
++    expect(JSON.stringify(settings)).not.toContain('app');
++  });
++
++  it('falls back to defaults for hand-edited nonsense', async () => {
++    const { service } = makeService({ [KEYS.EVENTS]: '{not json', [KEYS.PRIORITY]: '2' });
++
++    const settings = await service.get();
++
++    expect(settings.events).toHaveLength(3);
++    expect(settings.priority).toBe(0);
++  });
++});
++
++describe('RequestPushService.update', () => {
++  it('stores keys encrypted and trimmed', async () => {
++    const { service, store } = makeService();
++
++    await service.update({ appToken: ' app ', userKey: 'user' });
++
++    expect(store.get(KEYS.APP_TOKEN)).toBe('enc:app');
++    expect(store.get(KEYS.USER_KEY)).toBe('enc:user');
++  });
++
++  it('clears a key on an empty string', async () => {
++    const { service, store } = makeService(configured);
++
++    const settings = await service.update({ appToken: '' });
++
++    expect(store.get(KEYS.APP_TOKEN)).toBe('');
++    expect(settings.hasAppToken).toBe(false);
++  });
++
++  it('deduplicates events', async () => {
++    const { service } = makeService();
++
++    const settings = await service.update({ events: [NotificationType.BookRequestFailed, NotificationType.BookRequestFailed] });
++
++    expect(settings.events).toEqual([NotificationType.BookRequestFailed]);
++  });
++
++  it('refuses an event outside the push list', async () => {
++    const { service } = makeService();
++
++    await expect(service.update({ events: [NotificationType.BookRequestApproved as never] })).rejects.toThrow(BadRequestException);
++  });
++
++  it('refuses emergency priority', async () => {
++    const { service } = makeService();
++
++    await expect(service.update({ priority: 2 as never })).rejects.toThrow(BadRequestException);
++  });
++
++  it('refuses to store a key without an encryption key', async () => {
++    const { service } = makeService({}, { encryption: false });
++
++    await expect(service.update({ appToken: 'app' })).rejects.toThrow(BadRequestException);
++  });
++});
++
++describe('RequestPushService.forward', () => {
++  it('sends a selected event with an absolute link', async () => {
++    const { service, pushover } = makeService(configured);
++
++    await service.forward(NotificationType.BookRequestFailed, { title: 'Failed', message: 'Dune', actionUrl: '/requests' });
++
++    expect(pushover.send).toHaveBeenCalledWith({
++      appToken: 'app',
++      userKey: 'user',
++      title: 'Failed',
++      message: 'Dune',
++      priority: 0,
++      url: 'https://books.example.com/requests',
++    });
++  });
++
++  it('stays quiet for an event that is not selected', async () => {
++    const { service, pushover } = makeService(configured);
++
++    await service.forward(NotificationType.BookRequestSubmitted, { title: 'New', message: 'Dune' });
++
++    expect(pushover.send).not.toHaveBeenCalled();
++  });
++
++  it('stays quiet when switched off', async () => {
++    const { service, pushover } = makeService({ ...configured, [KEYS.ENABLED]: 'false' });
++
++    await service.forward(NotificationType.BookRequestFailed, { title: 'Failed', message: 'Dune' });
++
++    expect(pushover.send).not.toHaveBeenCalled();
++  });
++
++  it('stays quiet without both keys', async () => {
++    const { service, pushover } = makeService({ ...configured, [KEYS.USER_KEY]: '' });
++
++    await service.forward(NotificationType.BookRequestFailed, { title: 'Failed', message: 'Dune' });
++
++    expect(pushover.send).not.toHaveBeenCalled();
++  });
++
++  it('swallows a Pushover failure', async () => {
++    const { service, pushover } = makeService(configured);
++    pushover.send.mockRejectedValue(new PushoverError('user key is invalid'));
++
++    await expect(service.forward(NotificationType.BookRequestFailed, { title: 'Failed', message: 'Dune' })).resolves.toBeUndefined();
++  });
++
++  it('swallows an undecryptable key', async () => {
++    const { service, credentials, pushover } = makeService(configured);
++    credentials.decrypt.mockImplementation(() => {
++      throw new BadRequestException('key changed');
++    });
++
++    await expect(service.forward(NotificationType.BookRequestFailed, { title: 'Failed', message: 'Dune' })).resolves.toBeUndefined();
++    expect(pushover.send).not.toHaveBeenCalled();
++  });
++});
++
++describe('RequestPushService.test', () => {
++  it('prefers keys typed into the form over stored ones', async () => {
++    const { service, pushover } = makeService(configured);
++
++    expect(await service.test({ appToken: 'typed-app' })).toEqual({ ok: true });
++    expect(pushover.send).toHaveBeenCalledWith(expect.objectContaining({ appToken: 'typed-app', userKey: 'user' }));
++  });
++
++  it('works while push is switched off, so keys can be checked first', async () => {
++    const { service, pushover } = makeService({ ...configured, [KEYS.ENABLED]: 'false' });
++
++    expect(await service.test({})).toEqual({ ok: true });
++    expect(pushover.send).toHaveBeenCalled();
++  });
++
++  it('says what is missing', async () => {
++    const { service } = makeService();
++
++    expect(await service.test({ appToken: 'app' })).toEqual({ ok: false, error: expect.stringContaining('user key') });
++  });
++
++  it('passes on what Pushover refused', async () => {
++    const { service, pushover } = makeService(configured);
++    pushover.send.mockRejectedValue(new PushoverError('application token is invalid'));
++
++    expect(await service.test({})).toEqual({ ok: false, error: 'application token is invalid' });
++  });
++});

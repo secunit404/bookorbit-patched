@@ -1,0 +1,911 @@
+diff --git a/client/src/features/book-requests/composables/useRequestPush.ts b/client/src/features/book-requests/composables/useRequestPush.ts
+new file mode 100644
+index 0000000..4ac0f0e
+--- /dev/null
++++ b/client/src/features/book-requests/composables/useRequestPush.ts
+@@ -0,0 +1,81 @@
++import { ref } from 'vue'
++import { api } from '@/lib/api'
++import { DEFAULT_BOOK_REQUEST_PUSH_EVENTS } from '@bookorbit/types'
++import type {
++  BookRequestPushSettings,
++  TestBookRequestPushPayload,
++  TestBookRequestPushResult,
++  UpdateBookRequestPushSettingsPayload,
++} from '@bookorbit/types'
++
++const BASE_PATH = '/api/v1/admin/book-request-push'
++
++export function useRequestPush() {
++  const settings = ref<BookRequestPushSettings>({
++    enabled: false,
++    events: [...DEFAULT_BOOK_REQUEST_PUSH_EVENTS],
++    priority: 0,
++    hasAppToken: false,
++    hasUserKey: false,
++    encryptionConfigured: true,
++  })
++  const loading = ref(false)
++  const loadFailed = ref(false)
++
++  async function fetchSettings(): Promise<void> {
++    loading.value = true
++    loadFailed.value = false
++    try {
++      const res = await api(BASE_PATH)
++      if (!res.ok) {
++        loadFailed.value = true
++        return
++      }
++      settings.value = (await res.json()) as BookRequestPushSettings
++    } catch {
++      loadFailed.value = true
++    } finally {
++      loading.value = false
++    }
++  }
++
++  async function put(payload: UpdateBookRequestPushSettingsPayload): Promise<boolean> {
++    try {
++      const res = await api(BASE_PATH, {
++        method: 'PUT',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify(payload),
++      })
++      if (!res.ok) return false
++      settings.value = (await res.json()) as BookRequestPushSettings
++      return true
++    } catch {
++      return false
++    }
++  }
++
++  /** Serialised for the same reason the automation saves are: each adopts the whole reply. */
++  let queue: Promise<unknown> = Promise.resolve()
++
++  function save(payload: UpdateBookRequestPushSettingsPayload): Promise<boolean> {
++    const done = queue.then(() => put(payload))
++    queue = done
++    return done
++  }
++
++  async function sendTest(payload: TestBookRequestPushPayload): Promise<TestBookRequestPushResult> {
++    try {
++      const res = await api(`${BASE_PATH}/test`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify(payload),
++      })
++      if (!res.ok) return { ok: false }
++      return (await res.json()) as TestBookRequestPushResult
++    } catch {
++      return { ok: false }
++    }
++  }
++
++  return { settings, loading, loadFailed, fetchSettings, save, sendTest }
++}
+diff --git a/client/src/features/settings/RequestPushPanel.vue b/client/src/features/settings/RequestPushPanel.vue
+new file mode 100644
+index 0000000..028c8cb
+--- /dev/null
++++ b/client/src/features/settings/RequestPushPanel.vue
+@@ -0,0 +1,204 @@
++<script setup lang="ts">
++import { computed, onMounted, reactive, ref } from 'vue'
++import { useI18n } from 'vue-i18n'
++import { Loader2 } from '@lucide/vue'
++import { toast } from 'vue-sonner'
++import { BOOK_REQUEST_PUSH_EVENTS, BOOK_REQUEST_PUSH_PRIORITIES, NotificationType } from '@bookorbit/types'
++import type { BookRequestPushEvent, BookRequestPushPriority } from '@bookorbit/types'
++import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
++import { Button } from '@/components/ui/button'
++import SettingsRow from './components/SettingsRow.vue'
++import { useRequestPush } from '@/features/book-requests/composables/useRequestPush'
++import { SECRET_INPUT_ATTRS } from '@/lib/secret-input'
++
++const { t } = useI18n()
++const emit = defineEmits<{ encryptionState: [configured: boolean] }>()
++
++const { settings, loading, loadFailed, fetchSettings, save, sendTest } = useRequestPush()
++
++const EVENT_KEYS: Record<BookRequestPushEvent, string> = {
++  [NotificationType.BookRequestFailed]: 'failed',
++  [NotificationType.BookRequestNeedsReview]: 'needsReview',
++  [NotificationType.BookRequestNeedsRelease]: 'needsRelease',
++  [NotificationType.BookRequestSubmitted]: 'submitted',
++  [NotificationType.BookRequestAvailable]: 'available',
++}
++
++const PRIORITY_KEYS: Record<BookRequestPushPriority, string> = { [-1]: 'low', 0: 'normal', 1: 'high' }
++
++const draft = reactive({ appToken: '', userKey: '' })
++const secretsVisible = ref(false)
++const savingKeys = ref(false)
++const testing = ref(false)
++
++const keysDirty = computed(() => draft.appToken.trim() !== '' || draft.userKey.trim() !== '')
++const canTest = computed(
++  () => (draft.appToken.trim() !== '' || settings.value.hasAppToken) && (draft.userKey.trim() !== '' || settings.value.hasUserKey),
++)
++
++onMounted(async () => {
++  await fetchSettings()
++  emit('encryptionState', settings.value.encryptionConfigured)
++})
++
++async function persist(payload: Parameters<typeof save>[0]) {
++  if (await save(payload)) {
++    toast.success(t('settings.system.requests.push.saved'))
++    return true
++  }
++  toast.error(t('settings.system.requests.push.saveFailed'))
++  return false
++}
++
++function handleEnabledChange(enabled: boolean) {
++  void persist({ enabled })
++}
++
++function handleEventChange(event: BookRequestPushEvent, on: boolean) {
++  const next = on ? [...settings.value.events, event] : settings.value.events.filter((e) => e !== event)
++  void persist({ events: next })
++}
++
++function handlePriorityChange(e: Event) {
++  void persist({ priority: Number((e.target as HTMLSelectElement).value) as BookRequestPushPriority })
++}
++
++async function handleSaveKeys() {
++  savingKeys.value = true
++  const payload: { appToken?: string; userKey?: string } = {}
++  if (draft.appToken.trim()) payload.appToken = draft.appToken
++  if (draft.userKey.trim()) payload.userKey = draft.userKey
++  if (await persist(payload)) {
++    draft.appToken = ''
++    draft.userKey = ''
++  }
++  savingKeys.value = false
++}
++
++async function handleClearKeys() {
++  if (await persist({ appToken: '', userKey: '', enabled: false })) {
++    draft.appToken = ''
++    draft.userKey = ''
++  }
++}
++
++async function handleTest() {
++  testing.value = true
++  const result = await sendTest({ appToken: draft.appToken || undefined, userKey: draft.userKey || undefined })
++  testing.value = false
++  if (result.ok) toast.success(t('settings.system.requests.push.testOk'))
++  else
++    toast.error(
++      result.error ? t('settings.system.requests.push.testFailedDetail', { error: result.error }) : t('settings.system.requests.push.testFailed'),
++    )
++}
++</script>
++
++<template>
++  <div v-if="loading" class="settings-loading-state">
++    <Loader2 class="size-5 animate-spin text-muted-foreground" />
++    <span class="sr-only">{{ t('settings.system.requests.push.loading') }}</span>
++  </div>
++
++  <section v-else aria-labelledby="request-push-heading" class="space-y-3">
++    <h2 id="request-push-heading" class="sr-only">{{ t('settings.system.requests.push.title') }}</h2>
++
++    <p v-if="loadFailed" role="alert" class="text-sm text-destructive">{{ t('settings.system.requests.push.loadFailed') }}</p>
++
++    <div class="settings-card">
++      <div class="settings-card-header">
++        <span class="settings-card-title">{{ t('settings.system.requests.push.pushover') }}</span>
++        <span class="settings-state-pill">
++          {{ settings.enabled ? t('settings.system.requests.automation.stateOn') : t('settings.system.requests.automation.stateOff') }}
++        </span>
++      </div>
++
++      <p class="settings-hint settings-prose bg-card px-4 py-3 md:px-5">
++        {{ t('settings.system.requests.push.intro') }}
++        <a href="https://pushover.net/apps/build" target="_blank" rel="noopener noreferrer" class="underline">pushover.net</a>
++      </p>
++
++      <SettingsRow :label="t('settings.system.requests.push.enabled')" :hint="t('settings.system.requests.push.enabledShort')">
++        <ToggleSwitch
++          :model-value="settings.enabled"
++          :disabled="!settings.hasAppToken || !settings.hasUserKey"
++          :aria-label="t('settings.system.requests.push.enabled')"
++          @update:model-value="handleEnabledChange"
++        />
++      </SettingsRow>
++
++      <SettingsRow control-id="push-app-token" :label="t('settings.system.requests.push.appToken')">
++        <input
++          id="push-app-token"
++          v-model="draft.appToken"
++          v-bind="SECRET_INPUT_ATTRS"
++          type="text"
++          class="input-field w-full md:w-48"
++          :class="{ 'input-secret': !secretsVisible }"
++          :disabled="!settings.encryptionConfigured"
++          :placeholder="settings.hasAppToken ? t('settings.system.requests.push.keepStored') : ''"
++        />
++      </SettingsRow>
++
++      <SettingsRow control-id="push-user-key" :label="t('settings.system.requests.push.userKey')">
++        <input
++          id="push-user-key"
++          v-model="draft.userKey"
++          v-bind="SECRET_INPUT_ATTRS"
++          type="text"
++          class="input-field w-full md:w-48"
++          :class="{ 'input-secret': !secretsVisible }"
++          :disabled="!settings.encryptionConfigured"
++          :placeholder="settings.hasUserKey ? t('settings.system.requests.push.keepStored') : ''"
++        />
++      </SettingsRow>
++
++      <div class="flex flex-wrap justify-end gap-2 bg-card px-4 py-3 md:px-5">
++        <Button size="sm" variant="ghost" @click="secretsVisible = !secretsVisible">
++          {{ secretsVisible ? t('common.hide') : t('common.show') }}
++        </Button>
++        <Button v-if="settings.hasAppToken || settings.hasUserKey" size="sm" variant="outline" @click="handleClearKeys">
++          {{ t('settings.system.requests.push.clearKeys') }}
++        </Button>
++        <Button size="sm" variant="outline" :disabled="!canTest || testing" @click="handleTest">
++          <Loader2 v-if="testing" class="size-4 animate-spin" />
++          {{ t('settings.system.requests.push.sendTest') }}
++        </Button>
++        <Button size="sm" :disabled="!keysDirty || savingKeys || !settings.encryptionConfigured" @click="handleSaveKeys">
++          {{ t('settings.system.requests.push.saveKeys') }}
++        </Button>
++      </div>
++    </div>
++
++    <div class="settings-card">
++      <div class="settings-card-header">
++        <span class="settings-card-title">{{ t('settings.system.requests.push.events') }}</span>
++      </div>
++
++      <SettingsRow
++        v-for="event in BOOK_REQUEST_PUSH_EVENTS"
++        :key="event"
++        :label="t(`settings.system.requests.push.event.${EVENT_KEYS[event]}`)"
++        :hint="t(`settings.system.requests.push.event.${EVENT_KEYS[event]}Short`)"
++      >
++        <ToggleSwitch
++          :model-value="settings.events.includes(event)"
++          :aria-label="t(`settings.system.requests.push.event.${EVENT_KEYS[event]}`)"
++          @update:model-value="(on: boolean) => handleEventChange(event, on)"
++        />
++      </SettingsRow>
++
++      <SettingsRow
++        control-id="push-priority"
++        :label="t('settings.system.requests.push.priority')"
++        :hint="t('settings.system.requests.push.priorityShort')"
++      >
++        <select id="push-priority" :value="settings.priority" class="select-field w-full md:w-48" @change="handlePriorityChange">
++          <option v-for="p in BOOK_REQUEST_PUSH_PRIORITIES" :key="p" :value="p">
++            {{ t(`settings.system.requests.push.priorities.${PRIORITY_KEYS[p]}`) }}
++          </option>
++        </select>
++      </SettingsRow>
++    </div>
++  </section>
++</template>
+diff --git a/client/src/features/settings/RequestsSettings.vue b/client/src/features/settings/RequestsSettings.vue
+index 8951d03..bf2cf81 100644
+--- a/client/src/features/settings/RequestsSettings.vue
++++ b/client/src/features/settings/RequestsSettings.vue
+@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
+ import DownloadClientsPanel from './DownloadClientsPanel.vue'
+ import RequestAutomationPanel from './RequestAutomationPanel.vue'
+ import RequestIndexersPanel from './RequestIndexersPanel.vue'
++import RequestPushPanel from './RequestPushPanel.vue'
+ import SettingsPageHeader from './SettingsPageHeader.vue'
+ import SettingsTabs from './components/SettingsTabs.vue'
+ import { useRouteTab } from '@/composables/useRouteTab'
+@@ -12,11 +13,11 @@ const { t } = useI18n()
+ withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+ 
+ /**
+- * The three things this page configures, in the order a release passes through them: where it is
+- * found, what fetches it, and what happens once it lands. Stacked, they were one long scroll whose
++ * The things this page configures, in the order a release passes through them: where it is
++ * found, what fetches it, what happens once it lands, and who hears about it. Stacked, they were one long scroll whose
+  * middle looked like a continuation of its top.
+  */
+-const TABS = ['sources', 'clients', 'automation'] as const
++const TABS = ['sources', 'clients', 'automation', 'notifications'] as const
+ type Tab = (typeof TABS)[number]
+ 
+ function normalizeTab(value: unknown): Tab {
+@@ -27,6 +28,7 @@ const tabs = computed(() => [
+   { id: 'sources' as const, label: t('settings.system.requests.tabs.sources') },
+   { id: 'clients' as const, label: t('settings.system.requests.tabs.clients') },
+   { id: 'automation' as const, label: t('settings.system.requests.tabs.automation') },
++  { id: 'notifications' as const, label: t('settings.system.requests.tabs.notifications') },
+ ])
+ const { activeTab, selectTab } = useRouteTab<Tab>({
+   routeName: 'settings-admin-requests',
+@@ -70,8 +72,11 @@ function handleEncryptionState(configured: boolean) {
+     <!-- Narrower than the rest of the page: this tab is mostly prose, and a switch explaining
+          itself over the full width of a list view is a line too long to read comfortably. Wrapped
+          rather than passed as a class, because the panel has a v-if root and would not inherit it. -->
+-    <div v-else class="max-w-3xl">
++    <div v-else-if="activeTab === 'automation'" class="max-w-3xl">
+       <RequestAutomationPanel />
+     </div>
++    <div v-else class="max-w-3xl">
++      <RequestPushPanel @encryption-state="handleEncryptionState" />
++    </div>
+   </div>
+ </template>
+diff --git a/client/src/locales/en.json b/client/src/locales/en.json
+index 7ef5992..4c4c2fe 100644
+--- a/client/src/locales/en.json
++++ b/client/src/locales/en.json
+@@ -3622,7 +3622,8 @@
+         "tabs": {
+           "sources": "Sources",
+           "clients": "Download clients",
+-          "automation": "Automation"
++          "automation": "Automation",
++          "notifications": "Notifications"
+         },
+         "loading": "Loading download clients...",
+         "clients": "Download clients",
+@@ -4100,6 +4101,46 @@
+             "preferredHint": "Keep only the format that sits highest in the destination library's format priority."
+           }
+         },
++        "push": {
++          "title": "Push notifications",
++          "loading": "Loading push notification settings",
++          "loadFailed": "Push notification settings could not be loaded.",
++          "pushover": "Pushover",
++          "intro": "Sends request alerts to your phone, so a stuck or failed request does not wait for someone to open BookOrbit. Create an application at",
++          "enabled": "Send push notifications",
++          "enabledShort": "Save an application token and user key first.",
++          "appToken": "Application token",
++          "userKey": "User key",
++          "keepStored": "Saved, leave blank to keep",
++          "saveKeys": "Save keys",
++          "clearKeys": "Remove keys",
++          "sendTest": "Send test",
++          "testOk": "Test notification sent",
++          "testFailed": "Test notification could not be sent",
++          "testFailedDetail": "Test notification failed: {error}",
++          "saved": "Push notification settings saved",
++          "saveFailed": "Push notification settings could not be saved",
++          "events": "Notify me when",
++          "event": {
++            "failed": "A request fails",
++            "failedShort": "Including downloads that stall for 12 hours and imports that get stuck.",
++            "needsReview": "An import needs review",
++            "needsReviewShort": "The downloaded file did not match the request closely enough to file on its own.",
++            "needsRelease": "A request needs a release picked",
++            "needsReleaseShort": "Automation found nothing good enough to grab.",
++            "submitted": "A request is submitted",
++            "submittedShort": "Every new request waiting for approval.",
++            "available": "A requested book arrives",
++            "availableShort": "The book was imported into a library."
++          },
++          "priority": "Priority",
++          "priorityShort": "High bypasses Pushover quiet hours.",
++          "priorities": {
++            "low": "Low (no sound)",
++            "normal": "Normal",
++            "high": "High"
++          }
++        },
+         "profiles": {
+           "title": "Release profiles",
+           "effectiveRule": "Auto-download rule: first matching tier, then highest score (minimum {score}).",
+diff --git a/packages/types/src/book-request-push.ts b/packages/types/src/book-request-push.ts
+new file mode 100644
+index 0000000..3f30aeb
+--- /dev/null
++++ b/packages/types/src/book-request-push.ts
+@@ -0,0 +1,66 @@
++import { NotificationType } from "./notification";
++
++/**
++ * Pushover delivery for the request notifications an operator would otherwise only see in the
++ * bell. Stored as `app_settings` rows like the automation knobs; the two Pushover keys are
++ * encrypted with the same key as every other third-party secret the request feature holds.
++ */
++export const BOOK_REQUEST_PUSH_SETTING_KEYS = {
++  ENABLED: "book_request_push_enabled",
++  EVENTS: "book_request_push_events",
++  PRIORITY: "book_request_push_priority",
++  APP_TOKEN: "book_request_push_app_token",
++  USER_KEY: "book_request_push_user_key",
++} as const;
++
++/**
++ * The request events worth a phone buzz. Approved and rejected are left out: they are news for the
++ * requester, and the operator is the one who caused them.
++ */
++export const BOOK_REQUEST_PUSH_EVENTS = [
++  NotificationType.BookRequestFailed,
++  NotificationType.BookRequestNeedsReview,
++  NotificationType.BookRequestNeedsRelease,
++  NotificationType.BookRequestSubmitted,
++  NotificationType.BookRequestAvailable,
++] as const;
++export type BookRequestPushEvent = (typeof BOOK_REQUEST_PUSH_EVENTS)[number];
++
++/** Pushover's own scale, minus 2 (emergency), which needs retry/expire handling this does not do. */
++export const BOOK_REQUEST_PUSH_PRIORITIES = [-1, 0, 1] as const;
++export type BookRequestPushPriority = (typeof BOOK_REQUEST_PUSH_PRIORITIES)[number];
++
++export interface BookRequestPushSettings {
++  enabled: boolean;
++  events: BookRequestPushEvent[];
++  priority: BookRequestPushPriority;
++  hasAppToken: boolean;
++  hasUserKey: boolean;
++  encryptionConfigured: boolean;
++}
++
++/** Omitted fields are left as they are. An empty string clears a stored key. */
++export interface UpdateBookRequestPushSettingsPayload {
++  enabled?: boolean;
++  events?: BookRequestPushEvent[];
++  priority?: BookRequestPushPriority;
++  appToken?: string;
++  userKey?: string;
++}
++
++/** Keys typed into the form but not saved yet are tried as typed; anything omitted uses the stored one. */
++export interface TestBookRequestPushPayload {
++  appToken?: string;
++  userKey?: string;
++}
++
++export interface TestBookRequestPushResult {
++  ok: boolean;
++  error?: string;
++}
++
++export const DEFAULT_BOOK_REQUEST_PUSH_EVENTS: BookRequestPushEvent[] = [
++  NotificationType.BookRequestFailed,
++  NotificationType.BookRequestNeedsReview,
++  NotificationType.BookRequestNeedsRelease,
++];
+diff --git a/packages/types/src/index.ts b/packages/types/src/index.ts
+index c15a047..08c1edd 100644
+--- a/packages/types/src/index.ts
++++ b/packages/types/src/index.ts
+@@ -39,6 +39,7 @@ export * from "./koreader";
+ export * from "./book-dock";
+ export * from "./book-request";
+ export * from "./book-request-automation";
++export * from "./book-request-push";
+ export * from "./book-request-destination";
+ export * from "./book-request-preferences";
+ export * from "./book-request-profile";
+diff --git a/server/src/modules/book-request/book-request-notifier.service.ts b/server/src/modules/book-request/book-request-notifier.service.ts
+index 7cf4c0b..2cb6f95 100644
+--- a/server/src/modules/book-request/book-request-notifier.service.ts
++++ b/server/src/modules/book-request/book-request-notifier.service.ts
+@@ -6,6 +6,7 @@ import { LibraryService } from '../library/library.service';
+ import { NotificationService } from '../notification/notification.service';
+ import { ContentFilterRepository } from '../user/content-filter.repository';
+ import { BookRequestRepository } from './book-request.repository';
++import { RequestPushService } from './push/request-push.service';
+ 
+ export interface RequestNotification {
+   title: string;
+@@ -28,10 +29,12 @@ export class BookRequestNotifier {
+     private readonly repo: BookRequestRepository,
+     private readonly libraries: LibraryService,
+     private readonly contentFilters: ContentFilterRepository,
++    private readonly push: RequestPushService,
+   ) {}
+ 
+   /** Everyone who can act on the queue, resolved by permission rather than by enumerating users. */
+   async notifyApprovers(type: NotificationType, payload: RequestNotification): Promise<void> {
++    void this.push.forward(type, payload);
+     await this.dispatch(type, { ...payload, scope: { kind: 'permission', permission: Permission.ManageBookRequests } });
+   }
+ 
+@@ -43,8 +46,10 @@ export class BookRequestNotifier {
+    * way in; telling every approver about it would be noise about work that is not theirs.
+    */
+   async notifyResponsible(request: { id: number; selfServe: boolean }, type: NotificationType, payload: RequestNotification): Promise<void> {
+-    if (request.selfServe) return this.notifyInterested(request.id, type, payload);
+-    return this.notifyApprovers(type, payload);
++    if (!request.selfServe) return this.notifyApprovers(type, payload);
++    // The operator still wants to hear about a self-serve download going wrong on their server.
++    void this.push.forward(type, payload);
++    return this.notifyInterested(request.id, type, payload);
+   }
+ 
+   /** The requester plus every subscriber: everyone who put their name against this book. */
+@@ -72,6 +77,7 @@ export class BookRequestNotifier {
+    * rather than resolved exactly: one extra click beats a link that answers nothing.
+    */
+   async notifyBookAvailable(requestId: number, bookId: number | null, payload: Omit<RequestNotification, 'actionUrl'>): Promise<void> {
++    void this.push.forward(NotificationType.BookRequestAvailable, payload);
+     const userIds = await this.repo.findInterestedUserIds(requestId);
+     const libraryId = bookId === null ? null : await this.repo.findBookLibraryId(bookId);
+     const reachers = libraryId === null ? new Set<number>() : await this.libraries.findUserIdsWithAccess(libraryId, userIds);
+diff --git a/server/src/modules/book-request/book-request-push.controller.ts b/server/src/modules/book-request/book-request-push.controller.ts
+new file mode 100644
+index 0000000..1d9940e
+--- /dev/null
++++ b/server/src/modules/book-request/book-request-push.controller.ts
+@@ -0,0 +1,35 @@
++import { Body, Controller, Get, HttpCode, HttpStatus, Post, Put } from '@nestjs/common';
++import { AuditAction, AuditResource, Permission } from '@bookorbit/types';
++
++import { Auditable } from '../../common/decorators/auditable.decorator';
++import { RequirePermission } from '../../common/decorators/require-permission.decorator';
++import { TestPushDto, UpdatePushSettingsDto } from './dto/push-settings.dto';
++import { RequestPushService } from './push/request-push.service';
++
++/** Instance configuration holding third-party keys, so `ManageAppSettings` like the automation knobs. */
++@Controller('admin/book-request-push')
++@RequirePermission(Permission.ManageAppSettings)
++export class BookRequestPushController {
++  constructor(private readonly push: RequestPushService) {}
++
++  @Get()
++  get() {
++    return this.push.get();
++  }
++
++  @Put()
++  @Auditable({
++    action: AuditAction.AppSettingsUpdate,
++    resource: AuditResource.AppSettings,
++    description: 'Updated book request push notification settings',
++  })
++  update(@Body() dto: UpdatePushSettingsDto) {
++    return this.push.update(dto);
++  }
++
++  @Post('test')
++  @HttpCode(HttpStatus.OK)
++  test(@Body() dto: TestPushDto) {
++    return this.push.test(dto);
++  }
++}
+diff --git a/server/src/modules/book-request/book-request.module.ts b/server/src/modules/book-request/book-request.module.ts
+index 3a23279..b8d95df 100644
+--- a/server/src/modules/book-request/book-request.module.ts
++++ b/server/src/modules/book-request/book-request.module.ts
+@@ -13,6 +13,7 @@ import { UploadModule } from '../upload/upload.module';
+ import { UserModule } from '../user/user.module';
+ import { BookRequestAdminController } from './book-request-admin.controller';
+ import { BookRequestAutomationController } from './book-request-automation.controller';
++import { BookRequestPushController } from './book-request-push.controller';
+ import { BookRequestAttributionService } from './book-request-attribution.service';
+ import { BookRequestController } from './book-request.controller';
+ import { BookRequestSelfFulfilController } from './book-request-self-fulfil.controller';
+@@ -23,6 +24,8 @@ import { BookRequestNotifier } from './book-request-notifier.service';
+ import { BookRequestRepository } from './book-request.repository';
+ import { BookRequestService } from './book-request.service';
+ import { RequestCredentialService } from './request-credential.service';
++import { PushoverClient } from './push/pushover.client';
++import { RequestPushService } from './push/request-push.service';
+ import { DOWNLOAD_CLIENT_ADAPTERS } from './download-clients/download-client-adapter';
+ import { DownloadClientConfigService } from './download-clients/download-client-config.service';
+ import { DownloadClientReconciliationService } from './download-clients/download-client-reconciliation.service';
+@@ -95,6 +98,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
+     BookRequestSelfFulfilController,
+     BookRequestAdminController,
+     BookRequestAutomationController,
++    BookRequestPushController,
+     DownloadClientController,
+     IndexerController,
+     IndexerManagerController,
+@@ -108,6 +112,8 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
+     BookRequestGateway,
+     BookRequestEventsService,
+     RequestCredentialService,
++    PushoverClient,
++    RequestPushService,
+ 
+     DownloadClientRepository,
+     DownloadClientConfigService,
+diff --git a/server/src/modules/book-request/dto/push-settings.dto.ts b/server/src/modules/book-request/dto/push-settings.dto.ts
+new file mode 100644
+index 0000000..f2c419d
+--- /dev/null
++++ b/server/src/modules/book-request/dto/push-settings.dto.ts
+@@ -0,0 +1,43 @@
++import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
++import { BOOK_REQUEST_PUSH_EVENTS, BOOK_REQUEST_PUSH_PRIORITIES } from '@bookorbit/types';
++import type { BookRequestPushEvent, BookRequestPushPriority } from '@bookorbit/types';
++
++const MAX_KEY_LENGTH = 100;
++
++export class UpdatePushSettingsDto {
++  @IsOptional()
++  @IsBoolean()
++  enabled?: boolean;
++
++  @IsOptional()
++  @IsArray()
++  @ArrayMaxSize(BOOK_REQUEST_PUSH_EVENTS.length)
++  @IsIn(BOOK_REQUEST_PUSH_EVENTS, { each: true })
++  events?: BookRequestPushEvent[];
++
++  @IsOptional()
++  @IsIn(BOOK_REQUEST_PUSH_PRIORITIES)
++  priority?: BookRequestPushPriority;
++
++  @IsOptional()
++  @IsString()
++  @MaxLength(MAX_KEY_LENGTH)
++  appToken?: string;
++
++  @IsOptional()
++  @IsString()
++  @MaxLength(MAX_KEY_LENGTH)
++  userKey?: string;
++}
++
++export class TestPushDto {
++  @IsOptional()
++  @IsString()
++  @MaxLength(MAX_KEY_LENGTH)
++  appToken?: string;
++
++  @IsOptional()
++  @IsString()
++  @MaxLength(MAX_KEY_LENGTH)
++  userKey?: string;
++}
+diff --git a/server/src/modules/book-request/push/pushover.client.ts b/server/src/modules/book-request/push/pushover.client.ts
+new file mode 100644
+index 0000000..c9ce885
+--- /dev/null
++++ b/server/src/modules/book-request/push/pushover.client.ts
+@@ -0,0 +1,47 @@
++import { Injectable } from '@nestjs/common';
++
++const PUSHOVER_URL = 'https://api.pushover.net/1/messages.json';
++const TIMEOUT_MS = 10_000;
++/** Pushover's own limits. Over them it refuses the whole message rather than cutting it. */
++const MAX_TITLE = 250;
++const MAX_MESSAGE = 1024;
++const MAX_URL = 512;
++
++export interface PushoverMessage {
++  appToken: string;
++  userKey: string;
++  title: string;
++  message: string;
++  priority: number;
++  url?: string;
++}
++
++export class PushoverError extends Error {}
++
++@Injectable()
++export class PushoverClient {
++  async send(msg: PushoverMessage): Promise<void> {
++    const body = new URLSearchParams({
++      token: msg.appToken,
++      user: msg.userKey,
++      title: msg.title.slice(0, MAX_TITLE),
++      message: msg.message.slice(0, MAX_MESSAGE) || msg.title.slice(0, MAX_MESSAGE),
++      priority: String(msg.priority),
++    });
++    if (msg.url && msg.url.length <= MAX_URL) body.set('url', msg.url);
++
++    let res: Response;
++    try {
++      res = await fetch(PUSHOVER_URL, { method: 'POST', body, signal: AbortSignal.timeout(TIMEOUT_MS) });
++    } catch (err) {
++      throw new PushoverError(`Pushover could not be reached: ${err instanceof Error ? err.message : String(err)}`);
++    }
++    if (res.ok) return;
++
++    const detail = await res
++      .json()
++      .then((json: { errors?: unknown }) => (Array.isArray(json.errors) ? json.errors.join('; ') : ''))
++      .catch(() => '');
++    throw new PushoverError(detail || `Pushover answered HTTP ${res.status}`);
++  }
++}
+diff --git a/server/src/modules/book-request/push/request-push.service.ts b/server/src/modules/book-request/push/request-push.service.ts
+new file mode 100644
+index 0000000..3f0fe02
+--- /dev/null
++++ b/server/src/modules/book-request/push/request-push.service.ts
+@@ -0,0 +1,188 @@
++import { BadRequestException, Injectable, Logger } from '@nestjs/common';
++import { ConfigService } from '@nestjs/config';
++import {
++  BOOK_REQUEST_PUSH_EVENTS,
++  BOOK_REQUEST_PUSH_PRIORITIES,
++  BOOK_REQUEST_PUSH_SETTING_KEYS,
++  DEFAULT_BOOK_REQUEST_PUSH_EVENTS,
++} from '@bookorbit/types';
++import type {
++  BookRequestPushEvent,
++  BookRequestPushPriority,
++  BookRequestPushSettings,
++  NotificationType,
++  TestBookRequestPushPayload,
++  TestBookRequestPushResult,
++  UpdateBookRequestPushSettingsPayload,
++} from '@bookorbit/types';
++
++import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
++import { AppSettingsService } from '../../app-settings/app-settings.service';
++import { RequestCredentialService } from '../request-credential.service';
++import { PushoverClient } from './pushover.client';
++
++const KEYS = BOOK_REQUEST_PUSH_SETTING_KEYS;
++
++export interface PushPayload {
++  title: string;
++  message: string;
++  actionUrl?: string;
++}
++
++interface StoredPushSettings {
++  enabled: boolean;
++  events: BookRequestPushEvent[];
++  priority: BookRequestPushPriority;
++  appToken: string;
++  userKey: string;
++}
++
++/**
++ * Sends request notifications to the operator's phone through Pushover.
++ *
++ * Every failure here is logged and swallowed: the in-app notification has already been written,
++ * and a push that did not go out must never fail or slow the request it is about.
++ */
++@Injectable()
++export class RequestPushService {
++  private readonly logger = new Logger(RequestPushService.name);
++
++  constructor(
++    private readonly appSettings: AppSettingsService,
++    private readonly credentials: RequestCredentialService,
++    private readonly pushover: PushoverClient,
++    private readonly config: ConfigService,
++  ) {}
++
++  async get(): Promise<BookRequestPushSettings> {
++    const stored = await this.readStored();
++    return {
++      enabled: stored.enabled,
++      events: stored.events,
++      priority: stored.priority,
++      hasAppToken: stored.appToken !== '',
++      hasUserKey: stored.userKey !== '',
++      encryptionConfigured: this.credentials.isConfigured(),
++    };
++  }
++
++  async update(payload: UpdateBookRequestPushSettingsPayload): Promise<BookRequestPushSettings> {
++    const writes: Array<Promise<void>> = [];
++
++    if (payload.enabled !== undefined) writes.push(this.appSettings.setValue(KEYS.ENABLED, String(payload.enabled)));
++    if (payload.events !== undefined) {
++      const events = payload.events.filter(isPushEvent);
++      if (events.length !== payload.events.length) throw new BadRequestException('Unknown notification event');
++      writes.push(this.appSettings.setValue(KEYS.EVENTS, JSON.stringify([...new Set(events)])));
++    }
++    if (payload.priority !== undefined) {
++      if (!isPriority(payload.priority)) throw new BadRequestException('Priority must be -1, 0 or 1');
++      writes.push(this.appSettings.setValue(KEYS.PRIORITY, String(payload.priority)));
++    }
++    if (payload.appToken !== undefined) writes.push(this.writeSecret(KEYS.APP_TOKEN, payload.appToken));
++    if (payload.userKey !== undefined) writes.push(this.writeSecret(KEYS.USER_KEY, payload.userKey));
++
++    await Promise.all(writes);
++    return this.get();
++  }
++
++  async test(payload: TestBookRequestPushPayload): Promise<TestBookRequestPushResult> {
++    let stored: StoredPushSettings;
++    try {
++      stored = await this.readStored(true);
++    } catch (err) {
++      return { ok: false, error: errorMessage(err) };
++    }
++    const appToken = payload.appToken?.trim() || stored.appToken;
++    const userKey = payload.userKey?.trim() || stored.userKey;
++    if (!appToken || !userKey) return { ok: false, error: 'Both the application token and the user key are needed' };
++
++    try {
++      await this.pushover.send({
++        appToken,
++        userKey,
++        title: 'BookOrbit',
++        message: 'Test notification. Request alerts will arrive like this.',
++        priority: stored.priority,
++        url: this.absoluteUrl('/settings/admin/requests?tab=notifications'),
++      });
++      return { ok: true };
++    } catch (err) {
++      return { ok: false, error: errorMessage(err) };
++    }
++  }
++
++  /** Never throws and never needs awaiting by the caller. */
++  async forward(type: NotificationType, payload: PushPayload): Promise<void> {
++    try {
++      const stored = await this.readStored(true);
++      if (!stored.enabled || !stored.appToken || !stored.userKey) return;
++      if (!stored.events.includes(type as BookRequestPushEvent)) return;
++
++      await this.pushover.send({
++        appToken: stored.appToken,
++        userKey: stored.userKey,
++        title: payload.title,
++        message: payload.message,
++        priority: stored.priority,
++        url: payload.actionUrl ? this.absoluteUrl(payload.actionUrl) : undefined,
++      });
++    } catch (err) {
++      this.logger.warn(`[book_request.push] [fail] type=${type} error="${sanitizeLogValue(errorMessage(err))}" - push notification not sent`);
++    }
++  }
++
++  private async readStored(decrypt = false): Promise<StoredPushSettings> {
++    const values = await this.appSettings.getValues(Object.values(KEYS));
++    const appToken = values.get(KEYS.APP_TOKEN) ?? '';
++    const userKey = values.get(KEYS.USER_KEY) ?? '';
++    return {
++      enabled: values.get(KEYS.ENABLED) === 'true',
++      events: parseEvents(values.get(KEYS.EVENTS)),
++      priority: parsePriority(values.get(KEYS.PRIORITY)),
++      appToken: decrypt && appToken ? this.credentials.decrypt(appToken) : appToken,
++      userKey: decrypt && userKey ? this.credentials.decrypt(userKey) : userKey,
++    };
++  }
++
++  private writeSecret(key: string, value: string): Promise<void> {
++    const trimmed = value.trim();
++    return this.appSettings.setValue(key, trimmed === '' ? '' : this.credentials.encrypt(trimmed));
++  }
++
++  private absoluteUrl(path: string): string {
++    const base = (this.config.get<string>('app.appUrl') ?? '').replace(/\/+$/, '');
++    return `${base}${path}`;
++  }
++}
++
++function isPushEvent(value: unknown): value is BookRequestPushEvent {
++  return (BOOK_REQUEST_PUSH_EVENTS as readonly unknown[]).includes(value);
++}
++
++function isPriority(value: unknown): value is BookRequestPushPriority {
++  return (BOOK_REQUEST_PUSH_PRIORITIES as readonly unknown[]).includes(value);
++}
++
++function parseEvents(raw: string | undefined): BookRequestPushEvent[] {
++  if (raw === undefined) return [...DEFAULT_BOOK_REQUEST_PUSH_EVENTS];
++  try {
++    const parsed: unknown = JSON.parse(raw);
++    return Array.isArray(parsed) ? parsed.filter(isPushEvent) : [...DEFAULT_BOOK_REQUEST_PUSH_EVENTS];
++  } catch {
++    return [...DEFAULT_BOOK_REQUEST_PUSH_EVENTS];
++  }
++}
++
++function parsePriority(raw: string | undefined): BookRequestPushPriority {
++  const parsed = raw === undefined ? NaN : Number(raw);
++  return isPriority(parsed) ? parsed : 0;
++}
++
++function errorMessage(err: unknown): string {
++  if (err instanceof BadRequestException) {
++    const response = err.getResponse();
++    if (typeof response === 'object' && response !== null && 'message' in response) return String(response.message);
++  }
++  return err instanceof Error ? err.message : String(err);
++}

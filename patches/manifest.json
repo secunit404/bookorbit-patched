@@ -26,6 +26,15 @@
       "marker": "BOOKORBIT_PATCH_NOTES",
       "title": "This section",
       "description": "Pins the local patch list to the top of the What's New tab, since the version only says +patches. The popup keeps showing upstream releases only."
+    },
+    {
+      "id": "request-push",
+      "file": "patches/request-push.patch",
+      "tests": "patches/request-push-tests.patch",
+      "target": "server/src/modules/book-request/book-request-notifier.service.ts",
+      "marker": "RequestPushService",
+      "title": "Request alerts on your phone through Pushover",
+      "description": "Settings → Requests → Notifications can send a Pushover alert when a request fails or stalls, needs review, needs a release picked, is submitted, or arrives. Each event has its own switch, and Send test checks the keys before you rely on them. The keys are stored encrypted with BOOK_REQUEST_ENCRYPTION_KEY."
     }
   ]
 }
