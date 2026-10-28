@@ -1,7 +1,7 @@
 {
-  "image": "ghcr.io/secunit404/bookorbit-patched:v3.5.0",
-  "tag": "v3.5.0",
-  "upstream": "bookorbit/bookorbit@v3.5.0",
+  "image": "ghcr.io/secunit404/bookorbit-patched:v3.6.0",
+  "tag": "v3.6.0",
+  "upstream": "bookorbit/bookorbit@v3.6.0",
   "patches_sha": "594c1b35ce5dfc7d",
   "applied": [
     "audiobook-assembly",
@@ -9,5 +9,5 @@
     "whats-new",
     "request-push"
   ],
-  "built_at": "2026-10-21T14:42:19Z"
+  "built_at": "2026-10-28T10:44:34Z"
 }
