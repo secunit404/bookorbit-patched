@@ -1,13 +1,13 @@
 {
-  "image": "ghcr.io/secunit404/bookorbit-patched:v3.8.0",
-  "tag": "v3.8.0",
-  "upstream": "bookorbit/bookorbit@v3.8.0",
-  "patches_sha": "594c1b35ce5dfc7d",
+  "image": "ghcr.io/secunit404/bookorbit-patched:v3.9.0",
+  "tag": "v3.9.0",
+  "upstream": "bookorbit/bookorbit@v3.9.0",
+  "patches_sha": "fe2504834c766474",
   "applied": [
     "audiobook-assembly",
     "direct-download-score",
     "whats-new",
     "request-push"
   ],
-  "built_at": "2026-11-11T12:00:28Z"
+  "built_at": "2026-11-20T09:26:32Z"
 }
