@@ -1,9 +1,9 @@
 diff --git a/server/src/modules/book-request/fulfillment/audiobook-assembly.test.ts b/server/src/modules/book-request/fulfillment/audiobook-assembly.test.ts
 new file mode 100644
-index 0000000..33a7b52
+index 0000000..4e4c751
 --- /dev/null
 +++ b/server/src/modules/book-request/fulfillment/audiobook-assembly.test.ts
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,217 @@
 +import { execFileSync } from 'node:child_process';
 +import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 +import { tmpdir } from 'node:os';
@@ -167,6 +167,11 @@ index 0000000..33a7b52
 +    expect(args).toContain('-disposition:v:0 attached_pic');
 +    expect(args).toContain('-metadata:s:a:0 language=swe');
 +  });
++
++  it('restricts the source to audio demuxers and leaves the metadata input alone', () => {
++    const args = buildAssemblyArgs({ ...base, coverPath: null, probe: { codec: 'aac', bitRateKbps: null, durationMs: 1 } }).join(' ');
++    expect(args).toContain('-format_whitelist mp3,mov,aac,ogg,flac,wav -i /s/book.mp3 -f ffmetadata -i /s/meta.txt');
++  });
 +});
 +
 +describe.skipIf(!hasFfmpeg())('assembleAudiobook with a real ffmpeg', () => {
@@ -200,9 +205,24 @@ index 0000000..33a7b52
 +    });
 +    expect(extracted?.chapters.map((chapter) => chapter.title)).toEqual(['Del 1', 'Del 2']);
 +  });
++
++  it('refuses a playlist posing as the book instead of reading the files it points at', async () => {
++    const elsewhere = await mkdtemp(join(tmpdir(), 'bookorbit-elsewhere-'));
++    try {
++      const target = join(elsewhere, 'private.mp3');
++      execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:a', 'libmp3lame', target]);
++      const source = join(directory, 'book.m3u8');
++      await writeFile(source, `#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:3,\n${target}\n#EXT-X-ENDLIST\n`);
++
++      await expect(assembleAudiobook(source, assembly(), AbortSignal.timeout(60_000))).rejects.toThrow(/whitelist/);
++      expect(await readdir(directory)).toEqual(['book.m3u8']);
++    } finally {
++      await rm(elsewhere, { recursive: true, force: true });
++    }
++  });
 +});
 diff --git a/server/src/modules/book-request/fulfillment/direct-download.service.test.ts b/server/src/modules/book-request/fulfillment/direct-download.service.test.ts
-index a8cc550..99a4468 100644
+index 1361a74..514a855 100644
 --- a/server/src/modules/book-request/fulfillment/direct-download.service.test.ts
 +++ b/server/src/modules/book-request/fulfillment/direct-download.service.test.ts
 @@ -12,6 +12,13 @@ vi.mock('undici', async (importOriginal) => ({
@@ -219,7 +239,7 @@ index a8cc550..99a4468 100644
  import { Agent } from 'undici';
  
  import { DirectDownloadService, stagedDirectFileName } from './direct-download.service';
-@@ -629,6 +636,61 @@ describe('DirectDownloadService', () => {
+@@ -634,6 +641,61 @@ describe('DirectDownloadService', () => {
      await expect(service.status([HASH])).resolves.toEqual([]);
      await expect(stat(join(appDataPath, 'request-downloads', HASH))).rejects.toThrow();
    });
@@ -282,10 +302,10 @@ index a8cc550..99a4468 100644
  
  /**
 diff --git a/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts b/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts
-index 2cbed70..cbeba03 100644
+index d6c4e0d..6421bfe 100644
 --- a/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts
 +++ b/server/src/modules/book-request/indexers/plugins/plugin-host.test.ts
-@@ -313,6 +313,22 @@ describe('PluginIndexerAdapter', () => {
+@@ -323,6 +323,22 @@ describe('PluginIndexerAdapter', () => {
        ).rejects.toThrow();
      });
  

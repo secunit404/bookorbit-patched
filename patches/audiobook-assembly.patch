@@ -1,8 +1,8 @@
 diff --git a/packages/plugin-api/src/index.ts b/packages/plugin-api/src/index.ts
-index fe0ab8a..11c5f21 100644
+index f857013..d23a44b 100644
 --- a/packages/plugin-api/src/index.ts
 +++ b/packages/plugin-api/src/index.ts
-@@ -134,6 +134,32 @@ export interface PluginReleaseFile {
+@@ -144,6 +144,32 @@ export interface PluginReleaseFile {
    fileName: string;
    sizeBytes: number | null;
    format: string;
@@ -37,10 +37,10 @@ index fe0ab8a..11c5f21 100644
  export interface PluginTestResult {
 diff --git a/server/src/modules/book-request/fulfillment/audiobook-assembly.ts b/server/src/modules/book-request/fulfillment/audiobook-assembly.ts
 new file mode 100644
-index 0000000..98d57d7
+index 0000000..99a3c95
 --- /dev/null
 +++ b/server/src/modules/book-request/fulfillment/audiobook-assembly.ts
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,369 @@
 +import { execFile as execFileCallback } from 'node:child_process';
 +import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 +import { basename, dirname, extname, join } from 'node:path';
@@ -94,6 +94,12 @@ index 0000000..98d57d7
 +const MAX_COVER_BYTES = 15 * 1024 * 1024;
 +const COVER_TIMEOUT_MS = 30_000;
 +const FFPROBE_TIMEOUT_MS = 60_000;
++/**
++ * ffmpeg picks a demuxer by content, so a download named `.m3u8` is read as an HLS playlist and
++ * pulls whatever media files on this disk it lists into the book. Holding the source to plain
++ * audio containers refuses that before any listed file is opened.
++ */
++const SOURCE_DEMUXERS = 'mp3,mov,aac,ogg,flac,wav';
 +/** A transcode of a forty-hour book on a slow NAS, with room to spare. */
 +const FFMPEG_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 +const FFMPEG_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
@@ -211,7 +217,19 @@ index 0000000..98d57d7
 +async function probeAudio(source: string, signal: AbortSignal): Promise<AudioProbe> {
 +  const { stdout } = await execFile(
 +    ffprobePath(),
-+    ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_name,bit_rate:format=duration,bit_rate', '-of', 'json', source],
++    [
++      '-v',
++      'error',
++      '-format_whitelist',
++      SOURCE_DEMUXERS,
++      '-select_streams',
++      'a:0',
++      '-show_entries',
++      'stream=codec_name,bit_rate:format=duration,bit_rate',
++      '-of',
++      'json',
++      source,
++    ],
 +    { timeout: FFPROBE_TIMEOUT_MS, signal },
 +  );
 +  const data = JSON.parse(String(stdout)) as {
@@ -296,7 +314,20 @@ index 0000000..98d57d7
 +  probe: AudioProbe;
 +  assembly: AudiobookAssembly;
 +}): string[] {
-+  const args = ['-v', 'error', '-nostdin', '-y', '-i', input.source, '-f', 'ffmetadata', '-i', input.metadataPath];
++  const args = [
++    '-v',
++    'error',
++    '-nostdin',
++    '-y',
++    '-format_whitelist',
++    SOURCE_DEMUXERS,
++    '-i',
++    input.source,
++    '-f',
++    'ffmetadata',
++    '-i',
++    input.metadataPath,
++  ];
 +  if (input.coverPath) args.push('-i', input.coverPath);
 +
 +  args.push('-map', '0:a:0');
@@ -476,10 +507,10 @@ index f6e2cca..0784017 100644
  
    /**
 diff --git a/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts b/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts
-index 74515ff..5bb4d9f 100644
+index 0384c98..47da512 100644
 --- a/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts
 +++ b/server/src/modules/book-request/fulfillment/request-fulfillment.service.ts
-@@ -69,6 +69,7 @@ import { IndexerRegistry } from '../indexers/indexer-registry';
+@@ -70,6 +70,7 @@ import { IndexerRegistry } from '../indexers/indexer-registry';
  import { IndexerSearchService } from '../indexers/indexer-search.service';
  import { interpretRelease, type ReleaseFileInput, type ReleasePlan } from '../../scanner/lib/release-plan';
  import { resolveFormat } from '../indexers/release-scoring';
@@ -487,7 +518,7 @@ index 74515ff..5bb4d9f 100644
  import { BookRequestDownloadRepository } from './book-request-download.repository';
  import { DirectDownloadService, stagedDirectFileName } from './direct-download.service';
  import { infoHashFromMagnet, magnetDisplayName, MAX_TORRENT_FILE_BYTES, torrentMetadataFromFile, type TorrentFileMetadata } from './torrent.utils';
-@@ -288,6 +289,7 @@ export class RequestFulfillmentService {
+@@ -297,6 +298,7 @@ export class RequestFulfillmentService {
            fileUrl: directUrl as string,
            fileName: directFileName as string,
            clientKey: grab.clientKey,
@@ -495,7 +526,7 @@ index 74515ff..5bb4d9f 100644
          });
        } else {
          const config = await this.clients.resolveConfig(client.id);
-@@ -677,6 +679,7 @@ export class RequestFulfillmentService {
+@@ -698,6 +700,7 @@ export class RequestFulfillmentService {
          source: 'direct_url',
          fileUrl: file.url,
          fileName,
@@ -503,7 +534,7 @@ index 74515ff..5bb4d9f 100644
          // A digest of the URL, because there is no infohash and the poll loop still needs a key.
          clientKey: createHash('sha1').update(file.url).digest('hex'),
          releaseFormat: file.format.slice(0, 20),
-@@ -941,6 +944,7 @@ interface ParsedGrab {
+@@ -976,6 +979,7 @@ interface ParsedGrab {
    nzbFileName?: string;
    fileUrl?: string;
    fileName?: string;
@@ -512,7 +543,7 @@ index 74515ff..5bb4d9f 100644
    /** The size of what the release carries, which a magnet does not state. */
    releaseSizeBytes: number | null;
 diff --git a/server/src/modules/book-request/indexers/indexer-adapter.ts b/server/src/modules/book-request/indexers/indexer-adapter.ts
-index b03bcab..b0e08fe 100644
+index d70a4fe..1e1263d 100644
 --- a/server/src/modules/book-request/indexers/indexer-adapter.ts
 +++ b/server/src/modules/book-request/indexers/indexer-adapter.ts
 @@ -11,6 +11,8 @@ import type {
@@ -524,7 +555,7 @@ index b03bcab..b0e08fe 100644
  /** An indexer row with its credential already decrypted. Never logged, never returned over HTTP. */
  export interface ResolvedIndexerConfig {
    id: number;
-@@ -160,6 +162,7 @@ export interface ReleaseFile {
+@@ -168,6 +170,7 @@ export interface ReleaseFile {
    /** Known here even where the search could not state one, since a single file has a real size. */
    sizeBytes: number | null;
    format: string;
@@ -533,10 +564,10 @@ index b03bcab..b0e08fe 100644
  
  /** What a credentialed torrent download endpoint resolves to after redirects are followed. */
 diff --git a/server/src/modules/book-request/indexers/plugins/plugin-host.ts b/server/src/modules/book-request/indexers/plugins/plugin-host.ts
-index bffdf62..69c2a28 100644
+index e14ab25..05bd7df 100644
 --- a/server/src/modules/book-request/indexers/plugins/plugin-host.ts
 +++ b/server/src/modules/book-request/indexers/plugins/plugin-host.ts
-@@ -17,6 +17,7 @@ import { withDeadline } from '../../../../common/utils/with-deadline.utils';
+@@ -18,6 +18,7 @@ import { withDeadline } from '../../../../common/utils/with-deadline.utils';
  import { ensureSafeUrl, RemoteHostResolutionException } from '../../../../common/utils/ssrf.utils';
  import { buildSearchText } from '../search-text';
  import { MAX_TORRENT_FILE_BYTES } from '../../fulfillment/torrent.utils';
@@ -544,7 +575,7 @@ index bffdf62..69c2a28 100644
  import type { IndexerCredentialStore } from '../indexer-credential-store';
  import {
    IndexerSearchException,
-@@ -139,7 +140,9 @@ export class PluginIndexerAdapter implements IndexerAdapter {
+@@ -141,7 +142,9 @@ export class PluginIndexerAdapter implements IndexerAdapter {
          }
          throw error;
        }
