@@ -1,9 +1,9 @@
 diff --git a/server/src/modules/book-request/indexers/indexer-search.service.test.ts b/server/src/modules/book-request/indexers/indexer-search.service.test.ts
-index 2bf4e64..a7ea523 100644
+index 30f99bc..f46c3bb 100644
 --- a/server/src/modules/book-request/indexers/indexer-search.service.test.ts
 +++ b/server/src/modules/book-request/indexers/indexer-search.service.test.ts
-@@ -186,6 +186,24 @@ describe('IndexerSearchService', () => {
-     expect(result.releases[0].score).toBeGreaterThan(result.releases[1].score);
+@@ -254,6 +254,24 @@ describe('IndexerSearchService', () => {
+     expect(result.releases.find((item) => item.guid === 'wrong')?.score).toBeLessThan(50);
    });
  
 +  it('scores a source that serves the file itself as a direct download rather than by seeders', async () => {
@@ -28,10 +28,10 @@ index 2bf4e64..a7ea523 100644
      const torznab = { search: vi.fn().mockResolvedValue([release()]) };
      const archive = { search: vi.fn().mockRejectedValue(new Error('tracker is offline')) };
 diff --git a/server/src/modules/book-request/indexers/release-scoring.test.ts b/server/src/modules/book-request/indexers/release-scoring.test.ts
-index b40a479..997f521 100644
+index d98b475..358531e 100644
 --- a/server/src/modules/book-request/indexers/release-scoring.test.ts
 +++ b/server/src/modules/book-request/indexers/release-scoring.test.ts
-@@ -279,6 +279,15 @@ describe('scoreRelease', () => {
+@@ -334,6 +334,15 @@ describe('scoreRelease', () => {
      expect(scored.reasons.some((reason) => reason.code === 'seeders')).toBe(false);
    });
  

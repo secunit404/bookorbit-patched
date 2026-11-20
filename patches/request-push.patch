@@ -344,10 +344,10 @@ index 8951d03..bf2cf81 100644
    </div>
  </template>
 diff --git a/client/src/locales/en.json b/client/src/locales/en.json
-index 7ef5992..4c4c2fe 100644
+index 1432b96..dc4f5b5 100644
 --- a/client/src/locales/en.json
 +++ b/client/src/locales/en.json
-@@ -3622,7 +3622,8 @@
+@@ -4484,7 +4484,8 @@
          "tabs": {
            "sources": "Sources",
            "clients": "Download clients",
@@ -357,7 +357,7 @@ index 7ef5992..4c4c2fe 100644
          },
          "loading": "Loading download clients...",
          "clients": "Download clients",
-@@ -4100,6 +4101,46 @@
+@@ -4972,6 +4973,46 @@
              "preferredHint": "Keep only the format that sits highest in the destination library's format priority."
            }
          },
@@ -477,10 +477,10 @@ index 0000000..3f30aeb
 +  NotificationType.BookRequestNeedsRelease,
 +];
 diff --git a/packages/types/src/index.ts b/packages/types/src/index.ts
-index c15a047..08c1edd 100644
+index ccf5189..19b406c 100644
 --- a/packages/types/src/index.ts
 +++ b/packages/types/src/index.ts
-@@ -39,6 +39,7 @@ export * from "./koreader";
+@@ -46,6 +46,7 @@ export * from "./koreader";
  export * from "./book-dock";
  export * from "./book-request";
  export * from "./book-request-automation";
@@ -576,10 +576,10 @@ index 0000000..1d9940e
 +  }
 +}
 diff --git a/server/src/modules/book-request/book-request.module.ts b/server/src/modules/book-request/book-request.module.ts
-index 3a23279..b8d95df 100644
+index 7eb6a7f..cc2d4f6 100644
 --- a/server/src/modules/book-request/book-request.module.ts
 +++ b/server/src/modules/book-request/book-request.module.ts
-@@ -13,6 +13,7 @@ import { UploadModule } from '../upload/upload.module';
+@@ -12,6 +12,7 @@ import { UploadModule } from '../upload/upload.module';
  import { UserModule } from '../user/user.module';
  import { BookRequestAdminController } from './book-request-admin.controller';
  import { BookRequestAutomationController } from './book-request-automation.controller';
@@ -587,16 +587,16 @@ index 3a23279..b8d95df 100644
  import { BookRequestAttributionService } from './book-request-attribution.service';
  import { BookRequestController } from './book-request.controller';
  import { BookRequestSelfFulfilController } from './book-request-self-fulfil.controller';
-@@ -23,6 +24,8 @@ import { BookRequestNotifier } from './book-request-notifier.service';
- import { BookRequestRepository } from './book-request.repository';
+@@ -23,6 +24,8 @@ import { BookRequestRepository } from './book-request.repository';
  import { BookRequestService } from './book-request.service';
+ import { BookRequestSetupFlow } from './book-request.setup-flow';
  import { RequestCredentialService } from './request-credential.service';
 +import { PushoverClient } from './push/pushover.client';
 +import { RequestPushService } from './push/request-push.service';
+ import { RequestDownloadJobRepository } from './request-download-job.repository';
+ import { RequestDownloadJobSource } from './request-download-job-source';
  import { DOWNLOAD_CLIENT_ADAPTERS } from './download-clients/download-client-adapter';
- import { DownloadClientConfigService } from './download-clients/download-client-config.service';
- import { DownloadClientReconciliationService } from './download-clients/download-client-reconciliation.service';
-@@ -95,6 +98,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
+@@ -96,6 +99,7 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
      BookRequestSelfFulfilController,
      BookRequestAdminController,
      BookRequestAutomationController,
@@ -604,10 +604,10 @@ index 3a23279..b8d95df 100644
      DownloadClientController,
      IndexerController,
      IndexerManagerController,
-@@ -108,6 +112,8 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
-     BookRequestGateway,
-     BookRequestEventsService,
+@@ -112,6 +116,8 @@ import { RequestWatchdogService } from './fulfillment/request-watchdog.service';
      RequestCredentialService,
+     RequestDownloadJobRepository,
+     RequestDownloadJobSource,
 +    PushoverClient,
 +    RequestPushService,
  
